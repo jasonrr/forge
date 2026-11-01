@@ -17,7 +17,7 @@ export function routingEnabled(cwd: string): boolean {
     if (!dir) continue;
     for (const name of ["dev-loop.md", "tally-dev-loop.md"]) {
       const p = join(dir, ".claude", name);
-      if (!statSync(p, { throwIfNoEntry: false })?.isFile()) continue;
+      if (!isFile(p)) continue;
       try {
         return readFileSync(p, "utf8").split("\n").some((line) => line === "routing: on");
       } catch {
@@ -27,6 +27,15 @@ export function routingEnabled(cwd: string): boolean {
   }
   return false;
 }
+
+// Like `[ -f ]`: any stat error (ENOENT, EACCES on an unsearchable .claude) is just false.
+const isFile = (p: string) => {
+  try {
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
+};
 
 // ponytail: one git call per turn (~ms); cache per cwd if it ever shows up in profiles.
 function gitToplevel(cwd: string): string {
