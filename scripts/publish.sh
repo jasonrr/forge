@@ -41,6 +41,9 @@ if command -v claude >/dev/null; then
 else
   echo "publish: no claude CLI here; run: claude plugin marketplace update forge && claude plugin update forge@forge"
 fi
-if command -v codex >/dev/null && codex plugin marketplace list 2>/dev/null | grep -q '^forge[[:space:]]'; then
-  codex plugin marketplace upgrade forge && echo "publish: Codex marketplace refreshed — restart Codex to load it"
+if command -v codex >/dev/null && codex plugin list 2>/dev/null | grep -Eq '^forge@forge[[:space:]]+installed'; then
+  src=$(codex plugin marketplace list --json 2>/dev/null | jq -r '.marketplaces[] | select(.name == "forge") | .marketplaceSource.sourceType')
+  { [ "$src" != git ] || codex plugin marketplace upgrade forge; } && codex plugin add forge@forge >/dev/null \
+    && echo "publish: Codex install updated — restart Codex to load it" \
+    || echo "publish: Codex refresh failed; run: codex plugin marketplace upgrade forge && codex plugin add forge@forge"
 fi
