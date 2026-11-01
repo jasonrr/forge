@@ -1,14 +1,23 @@
 #!/usr/bin/env bash
-# SessionStart hook for the forge plugin. Emits the dev-loop routing block ONLY
-# when this repo opted in via .claude/dev-loop.md (or the older
+# SessionStart hook for the forge plugin (Claude Code and Codex). Emits the dev-loop
+# routing block ONLY when this repo opted in via .claude/dev-loop.md (or the older
 # .claude/tally-dev-loop.md) containing `routing: on` — the file /forge:setup
 # writes. Silent no-op everywhere else: consent lives in the repo, not the install.
 set -euo pipefail
 
-dir="${CLAUDE_PROJECT_DIR:-.}/.claude"
-cfg="$dir/dev-loop.md"
-[ -f "$cfg" ] || cfg="$dir/tally-dev-loop.md"
-if [ ! -f "$cfg" ] || ! grep -q '^routing: on$' "$cfg" 2>/dev/null; then
+# Claude Code sets CLAUDE_PROJECT_DIR; Codex runs plugin hooks in the session's cwd,
+# which may be a subdirectory. Look in the start dir first, then the git toplevel;
+# the first dev-loop.md / tally-dev-loop.md that is a regular file decides.
+start="${CLAUDE_PROJECT_DIR:-$PWD}"
+top="$(git -C "$start" rev-parse --show-toplevel 2>/dev/null || true)"
+cfg=""
+for d in "$start" "$top"; do
+  [ -n "$d" ] || continue
+  for n in dev-loop.md tally-dev-loop.md; do
+    if [ -f "$d/.claude/$n" ]; then cfg="$d/.claude/$n"; break 2; fi
+  done
+done
+if [ -z "$cfg" ] || ! grep -q '^routing: on$' "$cfg" 2>/dev/null; then
   exit 0
 fi
 
