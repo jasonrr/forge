@@ -5,7 +5,7 @@ description: One-time, consent-gated setup of the dev loop for this repo — ask
 
 # Setup
 
-You are configuring, never assuming. This skill writes exactly one file — `.claude/dev-loop.md` at the repo root — and only after the user approves its exact content. Never touch `.claude/settings.json`, global config, or anything else. Ask every question of the user (use AskUserQuestion when available).
+You are configuring, never assuming. This skill writes one file — `.claude/dev-loop.md` at the repo root, only after the user approves its exact content — plus the ignore lines in step 5. Never touch `.claude/settings.json`, global config, or anything else. Ask every question of the user (use AskUserQuestion when available).
 
 ## 1. Current state
 
@@ -60,3 +60,5 @@ Then ask (use AskUserQuestion when available) whether to gitignore or commit the
 
 - **Gitignore (default)** — add `.claude/dev-loop.md` to `.gitignore`. The loop stays personal to this checkout. This is the safe default because committing it means every teammate who *also* has the forge plugin gets the `<dev-loop>` block injected into their sessions on clone — arming routing for them without their own consent, which is exactly what the rest of this setup is careful to ask about first. (For a purely local ignore that doesn't touch a shared `.gitignore`, use `$(git rev-parse --git-path info/exclude)` instead.) On a new machine a gitignored file isn't cloned, so this repo needs `/forge:setup` again there.
 - **Commit** — the whole team shares one loop. Choose this only when everyone works in this repo with the forge plugin and wants the same routing + lenses. Teammates without the plugin just see inert markdown.
+
+Either way, make sure `.claude/worktrees/` and `.claude/dispatch-log.md` are ignored — the loop's build checkouts and dispatch log, never committed. Without this they show as untracked in the main checkout. Add any that are missing to the same file the user chose above (`.gitignore`, or `info/exclude` for a local-only ignore; `.gitignore` when they chose Commit), and show the lines you added.
