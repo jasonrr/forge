@@ -115,7 +115,7 @@ space open and say so. An orphaned pane is cheap; a closed pane holding unpushed
 
 
 **If a report never arrives,** you may schedule exactly one non-blocking check per dispatch — a
-Monitor on the pane's agent status, or a wakeup sized to the plan's expected duration; a harness with neither skips that scheduled check (a one-shot check below still applies) and tells the human what to watch. Still no
+Monitor on the pane's agent status, or a wakeup sized to the plan's expected duration; a harness with neither skips that scheduled check (in the desktop app, the one-shot check below still applies) and tells the human what to watch. Still no
 polling (see above).
 
 In the desktop app, that one check is `hc get <terminal>` plus `hc read --lines 40 <terminal>`, once — then tell the human what you saw. A plain shell at that terminal means the build *agent* is gone (most likely a reboot: the app brings terminals back as shells, not as the agent). The work is not: the worktree, its commits, and any uncommitted changes are still on disk. Tell the human, and offer to resume it in that shell — for a Claude build, `hc send <terminal> "claude --continue"` (the shell's folder is the worktree, so it picks up that session; the original report-back instruction is in it).

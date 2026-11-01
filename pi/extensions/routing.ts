@@ -40,7 +40,7 @@ const isFile = (p: string) => {
 // ponytail: one git call per turn (~ms); cache per cwd if it ever shows up in profiles.
 function gitToplevel(cwd: string): string {
   try {
-    return execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 }).trim();
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 }).replace(/\n+$/, "");
   } catch {
     return "";
   }

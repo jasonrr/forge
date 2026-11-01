@@ -35,9 +35,13 @@ printf 'routing: on\n' > "$t/nested/sub/.claude/dev-loop.md"
 (cd "$t/gitrepo/a/b" && env -u CLAUDE_PROJECT_DIR bash "$here/session-start.sh") | jq -e '.hookSpecificOutput.additionalContext | test("<dev-loop>")' >/dev/null
 (cd "$t/nested/sub" && env -u CLAUDE_PROJECT_DIR bash "$here/session-start.sh") | jq -e '.hookSpecificOutput.additionalContext | test("<dev-loop>")' >/dev/null
 [ -z "$(cd "$t/nested" && env -u CLAUDE_PROJECT_DIR bash "$here/session-start.sh")" ]
+# A repo dir whose name ends in a space: the hook's $(...) keeps it, so routing.ts must too.
+mkdir -p "$t/sp /.claude" "$t/sp /a"; git -C "$t/sp " init -q
+printf 'routing: on\n' > "$t/sp /.claude/dev-loop.md"
+(cd "$t/sp /a" && env -u CLAUDE_PROJECT_DIR bash "$here/session-start.sh") | jq -e '.hookSpecificOutput.additionalContext | test("<dev-loop>")' >/dev/null
 node --experimental-strip-types --no-warnings --input-type=module -e '
 const { routingEnabled } = await import(process.argv[1]);
-const got = ["new", "old", "off", "none", "locked", "gitrepo/a/b", "nested/sub", "nested", "blocked", "blk2/s"].map((d) => routingEnabled(`${process.argv[2]}/${d}`));
-if (got.join() !== "true,true,false,false,false,true,true,false,false,true") throw new Error(`routing.ts disagrees with hook: ${got}`);
+const got = ["new", "old", "off", "none", "locked", "gitrepo/a/b", "nested/sub", "nested", "blocked", "blk2/s", "sp /a"].map((d) => routingEnabled(`${process.argv[2]}/${d}`));
+if (got.join() !== "true,true,false,false,false,true,true,false,false,true,true") throw new Error(`routing.ts disagrees with hook: ${got}`);
 ' "file://$here/../pi/extensions/routing.ts" "$t"
 echo "session-start.test.sh: OK"
