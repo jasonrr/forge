@@ -5,7 +5,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 run() { CLAUDE_PROJECT_DIR="$1" bash "$here/session-start.sh"; }
-t="$(mktemp -d)"; trap 'chmod -R u+rwx "$t"; rm -rf "$t"' EXIT
+t="$(mktemp -d)"; export GIT_CEILING_DIRECTORIES="$t"; trap 'chmod -R u+rwx "$t"; rm -rf "$t"' EXIT
 mkdir -p "$t/new/.claude" "$t/old/.claude" "$t/off/.claude" "$t/none" "$t/locked/.claude"
 printf '# dev loop\nrouting: on\n' > "$t/new/.claude/dev-loop.md"
 printf '# dev loop\nrouting: on\n' > "$t/old/.claude/tally-dev-loop.md"
@@ -19,9 +19,19 @@ run "$t/old" | jq -e '.hookSpecificOutput.additionalContext | test("/forge:build
 [ -z "$(run "$t/locked")" ]
 ln -s "$here/session-start.sh" "$t/link.sh"
 CLAUDE_PROJECT_DIR="$t/new" bash "$t/link.sh" | jq -e '.hookSpecificOutput.additionalContext | test("<dev-loop>")' >/dev/null
+# No CLAUDE_PROJECT_DIR (Codex, pi): config at the git root is found from a subdirectory,
+# and a subdirectory's own config wins over the root's.
+mkdir -p "$t/gitrepo/.claude" "$t/gitrepo/a/b" "$t/nested/.claude" "$t/nested/sub/.claude"
+git -C "$t/gitrepo" init -q; git -C "$t/nested" init -q
+printf 'routing: on\n' > "$t/gitrepo/.claude/dev-loop.md"
+printf 'routing: off\n' > "$t/nested/.claude/dev-loop.md"
+printf 'routing: on\n' > "$t/nested/sub/.claude/dev-loop.md"
+(cd "$t/gitrepo/a/b" && env -u CLAUDE_PROJECT_DIR bash "$here/session-start.sh") | jq -e '.hookSpecificOutput.additionalContext | test("<dev-loop>")' >/dev/null
+(cd "$t/nested/sub" && env -u CLAUDE_PROJECT_DIR bash "$here/session-start.sh") | jq -e '.hookSpecificOutput.additionalContext | test("<dev-loop>")' >/dev/null
+[ -z "$(cd "$t/nested" && env -u CLAUDE_PROJECT_DIR bash "$here/session-start.sh")" ]
 node --experimental-strip-types --no-warnings --input-type=module -e '
 const { routingEnabled } = await import(process.argv[1]);
-const got = ["new", "old", "off", "none", "locked"].map((d) => routingEnabled(`${process.argv[2]}/${d}`));
-if (got.join() !== "true,true,false,false,false") throw new Error(`routing.ts disagrees with hook: ${got}`);
+const got = ["new", "old", "off", "none", "locked", "gitrepo/a/b", "nested/sub", "nested"].map((d) => routingEnabled(`${process.argv[2]}/${d}`));
+if (got.join() !== "true,true,false,false,false,true,true,false") throw new Error(`routing.ts disagrees with hook: ${got}`);
 ' "file://$here/../pi/extensions/routing.ts" "$t"
 echo "session-start.test.sh: OK"
