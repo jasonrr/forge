@@ -49,3 +49,4 @@ None blocking. The live `~/.claude/settings.json` is deliberately a regular file
 ## Deviations
 
 - T1 commit 25576c3, 068acc7 — deviation: review found routing.ts threw EACCES on an unsearchable `.claude` (statSync only suppresses ENOENT; bug predates this plan, the toplevel step widened it). Fixed in 068acc7 with an isFile helper that skips like bash `[ -f ]`, plus two test cases (`blocked`, `blk2/s`) — parked: none
+- T2 commit 52c851a, 5274d72 — deviation: publish.sh Codex block now gates on forge being installed, skips `marketplace upgrade` for a local (non-Git) marketplace (it exits 1 there, after the push), and re-runs `codex plugin add forge@forge`, since a marketplace upgrade alone leaves the versioned install cache on the old version (verified in a throwaway CODEX_HOME) — parked: none
