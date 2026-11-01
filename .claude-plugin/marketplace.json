@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "forge",
+  "description": "Forge — a code factory for agents.",
+  "owner": { "name": "Jason Rosoff" },
+  "plugins": [
+    {
+      "name": "forge",
+      "description": "brainstorm → plan → build in worktrees → adversarial review → PR. /forge:* skills plus a consent-gated SessionStart routing hook.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
