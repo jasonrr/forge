@@ -24,4 +24,4 @@ Deferred from design docs/decisions/<file>.
 EOF
 ```
 
-Design approval comes from the user, not from you. Once approved, offer /forge:plan. If neither `.claude/dev-loop.md` nor `.claude/tally-dev-loop.md` exists in this repo, also offer /forge:setup once — one line, not a pitch.
+Design approval comes from the user, not from you. Once approved, offer /forge:plan. If this repo has no dev-loop file (`.claude/dev-loop.md`, or the older `.claude/tally-dev-loop.md`), also offer /forge:setup once — one line, not a pitch.

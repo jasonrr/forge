@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 // Single copy of the routing block, shared with hooks/session-start.sh.
@@ -7,14 +7,18 @@ import { join } from "node:path";
 // Assumes pi loads this file in place (it does today); a bundler would break the relative path.
 const DEV_LOOP_BLOCK = readFileSync(new URL("../../hooks/routing.md", import.meta.url), "utf8").trimEnd();
 
-// Mirrors hooks/session-start.sh: .claude/dev-loop.md, else the older
-// .claude/tally-dev-loop.md; a `routing: on` line, matched exactly (no CRLF).
-function routingEnabled(cwd: string): boolean {
+// Mirrors hooks/session-start.sh: the first of .claude/dev-loop.md, then the older
+// .claude/tally-dev-loop.md, that is a regular file (`[ -f ]`) decides alone — an
+// unreadable one means off, never a fall-through. A `routing: on` line, exact (no CRLF).
+export function routingEnabled(cwd: string): boolean {
   for (const name of ["dev-loop.md", "tally-dev-loop.md"]) {
+    const p = join(cwd, ".claude", name);
+    if (!statSync(p, { throwIfNoEntry: false })?.isFile()) continue;
     try {
-      const cfg = readFileSync(join(cwd, ".claude", name), "utf8");
-      return cfg.split("\n").some((line) => line === "routing: on");
-    } catch {}
+      return readFileSync(p, "utf8").split("\n").some((line) => line === "routing: on");
+    } catch {
+      return false;
+    }
   }
   return false;
 }
