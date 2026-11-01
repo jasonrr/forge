@@ -45,3 +45,7 @@ Options compared:
 ## Open questions
 
 None blocking. The live `~/.claude/settings.json` is deliberately a regular file, not the stow symlink. The dotfiles copy only seeds a new install, so forge's entries must stay in that copy for the new-Mac path to work.
+
+## Deviations
+
+- T1 commit 25576c3, 068acc7 — deviation: review found routing.ts threw EACCES on an unsearchable `.claude` (statSync only suppresses ENOENT; bug predates this plan, the toplevel step widened it). Fixed in 068acc7 with an isFile helper that skips like bash `[ -f ]`, plus two test cases (`blocked`, `blk2/s`) — parked: none
