@@ -1,6 +1,6 @@
 ---
 name: shelve
-description: Park the current track — write where it stopped to its issue (or a new one labelled `shelved`), close the draft PR unmerged, remove the worktree, keep the branch. Run inside the track's worktree; the Herdr work panel's Shelve button runs it. Undo is /forge:start on that issue.
+description: Park the current track — write where it stopped to a new `Shelved: <slug>` issue (labelled `shelved`, linked to the track's issue if any), close the draft PR unmerged, remove the worktree, keep the branch. Run inside the track's worktree; the Herdr work panel's Shelve button runs it. Undo is /forge:start on that issue.
 ---
 
 # Shelve
