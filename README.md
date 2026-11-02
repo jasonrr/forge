@@ -33,8 +33,8 @@ Codex skips plugin hooks until you trust them: accept forge's SessionStart hook 
 
 The dev-loop skills used to ship inside the [tally](https://github.com/jasonrr/herdr-tally) plugin as `/tally:*`. They are the same skills, store-free. Your `.claude/tally-dev-loop.md` keeps working; `/forge:setup` offers to rename it. If you still have `learnings`-tagged tally scratchpads, copy their bullets into `docs/learnings.md` once — Forge reads only the file.
 
-MIT.
-
 ## Herdr work panel
 
 In the Herdr desktop app, a bundled mod shows your forge work as tracks (one per git worktree) in four views: a docked sidebar, a work board, a track detail view with editing, and a backlog of open issues, with every GitHub link one click away and no stored state. Install it with `bash scripts/install-herdr-mod.sh`, which symlinks `herdr/mods/forge` into `~/.config/herdr-app/mods/forge`. Start work and Shelve run `/forge:start` and `/forge:shelve` in an agent tab.
+
+MIT.

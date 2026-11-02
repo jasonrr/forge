@@ -6,7 +6,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
 import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay } from "herdr";
 import { writeFile, mkdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app (AGENTS.md "Other built-ins")
-import { STAGES, parseWorktrees, kind, planTasks, tracks, grouped, takenIssues, isParked, slugify, branchFor } from "./model.js";
+import { STAGES, parseWorktrees, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch } from "./model.js";
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const MONO = (el) => el.font_family(settings().font_family); // the terminal's mono font (AGENTS.md: settings().font_family)
@@ -129,10 +129,8 @@ export default class Forge extends View {
       return { label: "Remove worktree", go: async () => { const st = sp ? await this.git(["status", "--porcelain"], t.path) : null; return st?.ok && !st.out ? openOverlay({ mod: "worktree", props: { action: "remove", space: sp.id, folder: t.path }, kind: "dialog" })
         : this.openAgent(this.root, `This branch is merged. Run: git worktree remove "${t.path}" (never --force; if it refuses, say why and stop), then git branch -d ${t.branch} (never -D). Then stop.`); } };
     }
-    if (t.stage === 4) return { label: "Review", go: () => this.openAgent(t.path, "/forge:review-branch") };
-    if (t.stage >= 2) return { label: t.stage === 3 ? "Resume build" : "Build", go: () => this.openAgent(t.path, t.plan ? `/forge:build ${t.plan}` : "/forge:build") };
-    if (t.stage === 1) return { label: "Plan", go: () => this.openAgent(t.path, "/forge:plan") };
-    return { label: "Start", go: () => this.openAgent(t.path, "/forge:start") };
+    // /forge:start is the only begin verb: it reads the branch and routes (debug / brainstorm / plan / build / review); the label is for the human.
+    return { label: ["Start", "Plan", "Build", "Resume", "Review"][t.stage], go: () => this.openAgent(t.path, "/forge:start") };
   }
   shelve(t) { this.openAgent(t.path, "/forge:shelve"); }
 
@@ -290,6 +288,7 @@ export default class Forge extends View {
     cx.spawn(async (cx) => {
       const tr = this.track(); if (!tr) return;
       for (const key of ["design", "plan"]) {
+        if (this.docs[key] && this.docs[key].rel !== tr[key] && !this.editing) delete this.docs[key]; // a renamed file must reload
         const rel = tr[key]; if (!rel || this.docs[key]) continue;
         try { this.docs[key] = { rel, text: (await readTextFile(`${tr.path}/${rel}`)) ?? "" }; } catch (e) { this.docs[key] = { rel, text: null, err: String(e) }; } // text null = unreadable: shown, never editable
       }
@@ -331,14 +330,14 @@ export default class Forge extends View {
   }
   renderDetail(cx) {
     const t = theme(), tr = this.track();
-    if (!tr) return v_flex().id("root").size_full().bg(t.surface).p(12).gap(8).text_color(t.dim).child(this.data.worktrees.length ? "This track's worktree is gone (shelved or removed)." : "loading…").when(this.data.worktrees.length, (e) => e.child(this.button(t, "closepane", "Close pane", () => run("pane.close", {}))));
+    if (!tr) return v_flex().id("root").size_full().bg(t.surface).p(12).gap(8).text_color(t.dim).child(this.data.worktrees.length ? "This track's worktree is gone (shelved or removed)." : "loading…");
     const color = this.groupColor(t, tr.group), nx = this.next(tr), gh = this.repoUrl();
     const tabs = [["design", "Design"], ["plan", "Plan"], ["pr", tr.pr ? `PR #${tr.pr.number}${tr.pr.isDraft ? " (draft)" : ""}` : "PR"], ["issues", `Issues (${tr.issues.length})`]];
     const tabEl = (k, l) => div().id(`t-${k}`).px(10).py(7).text_size(12.5).cursor_pointer().border_b(2).border_color(this.tab === k ? t.accent : NONE).text_color(this.tab === k ? t.foreground : t.muted).child(l)
       .on_click((_e, cx) => { if (this.editing) return; this.tab = k; cx.notify(); });
     const doc = (key) => {
       const d = this.docs[key];
-      if (!tr[key]) return v_flex().p(12).gap(8).child(div().text_color(t.dim).child(`no ${key} on this branch yet`)).child(this.button(t, `mk-${key}`, key === "design" ? "Brainstorm" : "Plan", () => this.openAgent(tr.path, key === "design" ? "/forge:brainstorm" : "/forge:plan"), true));
+      if (!tr[key]) return v_flex().p(12).gap(8).child(div().text_color(t.dim).child(`no ${key} on this branch yet`)).child(this.button(t, `mk-${key}`, key === "design" ? "Brainstorm" : "Plan", () => this.openAgent(tr.path, "/forge:start"), true));
       if (!d) return this.empty(t, "loading…");
       if (d.text === null) return this.empty(t, `can't read ${d.rel}: ${d.err}`);
       if (this.editing) return Editor.new(this.editor).flex_1().min_h(0);
@@ -409,10 +408,24 @@ export default class Forge extends View {
     if (!title) { this.busy = "Pick an issue or type a title."; cx.notify(); return; }
     if (!this.root) { this.busy = "No git repo here."; cx.notify(); return; }
     try {
-      const branch = branchFor(issue, title), path = `${home()}/.herdr/worktrees/${this.repoName()}/${branch.replace(/\//g, "-")}`; // Herdr's worktree path rule: branch with / as -
+      let branch = branchFor(issue, title);
       this.busy = "Creating worktree…"; cx.notify();
       await this.git(["fetch", "-q", "origin", "main"]);
-      const exists = (await this.git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).ok;
+      const has = async (b) => (await this.git(["show-ref", "--verify", "--quiet", `refs/heads/${b}`])).ok;
+      const onOrigin = async (b) => (await this.git(["ls-remote", "--exit-code", "--heads", "origin", b])).ok;
+      const fromShelf = shelfBranch(issue) !== null;
+      if (!fromShelf && await has(branch)) { // never silently reuse a branch that isn't this shelf's: first free -2, -3, …
+        const base = branch; let n = 2;
+        for (; n <= 9; n++) { branch = `${base}-${n}`; if (!(await has(branch)) && !(await onOrigin(branch))) break; }
+        if (n > 9) throw new Error(`${base} and ${base}-2…-9 are all taken — pick another title.`);
+      }
+      let exists = await has(branch);
+      if (fromShelf && !exists && await onOrigin(branch)) { // a shelf from another machine: resume its work, not a fresh branch from main
+        const f = await this.git(["fetch", "-q", "origin", `${branch}:${branch}`]);
+        if (!f.ok) throw new Error(`could not fetch ${branch} from origin`);
+        exists = true;
+      }
+      const path = `${home()}/.herdr/worktrees/${this.repoName()}/${branch.replace(/\//g, "-")}`; // Herdr's worktree path rule: branch with / as -
       const r = await exec("git", [...GIT, "worktree", "add", ...(exists ? [path, branch] : ["--no-track", "-b", branch, path, this.base])], { cwd: this.root });
       if (r.code !== 0) { this.busy = (r.stderr || "git worktree add failed").trim(); cx.notify(); return; }
       const extra = this.mode === "issue" ? "" : this.brief.value().trim();

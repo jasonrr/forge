@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, STAGES } from "./model.js";
+import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch, STAGES } from "./model.js";
 
 const WT = "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\nworktree /r/.claude/worktrees/ring\nHEAD bbb\nbranch refs/heads/feat/ring\n\nworktree /h/.herdr/worktrees/r/fix-login\nHEAD ccc\ndetached\n\nworktree /gone\nHEAD ddd\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n";
 
@@ -139,4 +139,13 @@ test("takenIssues and isParked", () => {
   assert.equal(isParked({ title: "[p2] Dispatch log grows", body: "" }), true);
   assert.equal(isParked({ title: "Thing", body: "Filed from the plan as out of scope.\nFrom PR #8" }), true);
   assert.equal(isParked({ title: "Thing", body: "No design yet." }), false);
+});
+
+test("branchFor: a Branch: line counts only on a shelf issue", () => {
+  assert.equal(branchFor({ title: "Plain", labels: [], body: "Branch: `feat/other`" }), "feat/plain");
+  assert.equal(shelfBranch({ title: "Plain", labels: [], body: "Branch: `feat/other`" }), null);
+  assert.equal(shelfBranch({ title: "Shelved: x", labels: [], body: "Branch: `feat/x`" }), "feat/x");
+  assert.equal(shelfBranch({ title: "x", labels: [{ name: "shelved" }], body: "Branch: `feat/x`" }), "feat/x");
+  assert.equal(shelfBranch({ title: "Shelved: x", labels: [], body: "Branch: `--detach`" }), null);
+  assert.equal(shelfBranch(null), null);
 });

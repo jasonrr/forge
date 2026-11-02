@@ -114,11 +114,16 @@ export function takenIssues(ts) {
   return m;
 }
 
-// The branch a track for this issue lives on: a shelved issue names it (`Branch: \`x\``, written by
+// The branch a track for this issue lives on: a shelf issue (label or `Shelved:` title) names it (`Branch: \`x\``, written by
 // /forge:shelve); otherwise fix/<slug> for a labelled bug, else feat/<slug>. The skill mirrors this.
+export function shelfBranch(issue) {
+  const shelf = (issue?.labels ?? []).some((l) => l.name === "shelved") || /^Shelved:/.test(issue?.title ?? "");
+  const m = shelf ? /Branch: `([^`\s]+)`/.exec(issue?.body ?? "") : null;
+  return m && /^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(m[1]) ? m[1] : null;
+}
 export function branchFor(issue, title) {
-  const m = /Branch: `([^`\s]+)`/.exec(issue?.body ?? "");
-  if (m && /^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(m[1])) return m[1];
+  const sb = shelfBranch(issue);
+  if (sb) return sb;
   const slug = slugify(issue?.title ?? title) || (issue?.number ? `issue-${issue.number}` : "work"); // a non-Latin title slugifies to ""
   return `${kind(issue ?? {}) === "bug" ? "fix" : "feat"}/${slug}`;
 }
