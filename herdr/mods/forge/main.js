@@ -229,7 +229,116 @@ export default class Forge extends View {
           .children(g.items.length ? g.items.map((s) => card(g, s)) : [this.empty(t, "none")]))));
   }
   renderBacklog(cx) { return div().id("root").size_full().bg(theme().surface).p(12).child("backlog"); }
-  renderDetail(cx) { return div().id("root").size_full().bg(theme().surface).p(12).child("detail"); }
+  initDetail(cx) {
+    this.tab = "design"; this.docs = {}; this.editing = false; this.editor = null; this.saveMsg = null; this.log = [];
+    cx.spawn(async (cx) => { for (;;) { try { await watchFolder(`${props().track}/docs`); } catch { return; } if (!this.editing) { this.docs = {}; this.loadDoc(cx); } } }); // ends when the worktree goes; while editing, save() reconciles instead
+    this.loadDoc(cx);
+  }
+  // Reads the shown tab's file once per change; `expected` is the text on disk when it was read.
+  loadDoc(cx) {
+    cx.spawn(async (cx) => {
+      const tr = this.track(); if (!tr) return;
+      for (const key of ["design", "plan"]) {
+        const rel = tr[key]; if (!rel || this.docs[key]) continue;
+        const text = (await readTextFile(`${tr.path}/${rel}`).catch((e) => `_${e}_`)) ?? "";
+        this.docs[key] = { rel, text };
+      }
+      this.log = (await this.git(["log", "-6", "--format=%h%x09%s%x09%cr"], tr.path)).out.split("\n").filter(Boolean).map((l) => l.split("\t"));
+      cx.notify();
+    });
+  }
+  edit(cx) {
+    const d = this.docs[this.tab]; if (!d) return;
+    this.editBase = d.text; // NOT this.base (that is the git base ref the header and refresh use) — what the person started from: the `expected` for the save and the merge base — never the reloaded text
+    this.editor = EditorState.new({ language: "markdown", value: d.text, soft_wrap: true, line_numbers: false, folding: false });
+    this.editing = true; cx.notify();
+  }
+  // Stale save: 3-way merge with git merge-file (base = what we read, ours = the edit, theirs = disk).
+  // Markers left → write them and open an agent tab in the worktree to resolve. Never a refusal.
+  async save(cx) {
+    const tr = this.track(), d = this.docs[this.tab]; if (!tr || !d) return;
+    const path = `${tr.path}/${d.rel}`, ours = this.editor.value();
+    try { await writeTextFile(path, ours, this.editBase); this.saveMsg = "saved"; }
+    catch {
+      const theirs = (await readTextFile(path)) ?? "";
+      const dir = `${appHome()}/data/forge-merge`, tmp = `${dir}/${Date.now()}`; // per save, so two panes never share files
+      await mkdir(dir, { recursive: true });
+      await Promise.all([writeFile(`${tmp}.base`, this.editBase), writeFile(`${tmp}.ours`, ours), writeFile(`${tmp}.theirs`, theirs)]);
+      const r = await exec("git", ["merge-file", "-p", "-L", "yours", "-L", "before", "-L", "agent", `${tmp}.ours`, `${tmp}.base`, `${tmp}.theirs`]);
+      exec("rm", ["-f", `${tmp}.base`, `${tmp}.ours`, `${tmp}.theirs`]);
+      // merge-file exits with the conflict count (0..127); anything else is an error with empty stdout — never write that over the file.
+      if (r.code < 0 || r.code > 127) { this.saveMsg = `merge failed: ${(r.stderr || "git merge-file error").trim()} — your text is still in the editor`; cx.notify(); return; }
+      await writeTextFile(path, r.stdout, theirs);
+      if (r.code === 0) this.saveMsg = "merged with an agent's edit and saved";
+      else { this.saveMsg = "conflict — an agent tab is resolving it"; this.openAgent(tr.path, `Resolve the conflict markers in ${d.rel} (yours = the person's edit, agent = your earlier write); keep both intents, then stop.`); }
+    }
+    this.docs = {}; this.editing = false; this.editor = null; this.editBase = null; this.loadDoc(cx); cx.notify();
+  }
+  renderDetail(cx) {
+    const t = theme(), tr = this.track();
+    if (!tr) return v_flex().id("root").size_full().bg(t.surface).p(12).gap(8).text_color(t.dim).child(this.data.worktrees.length ? "This track's worktree is gone (shelved or removed)." : "loading…").when(this.data.worktrees.length, (e) => e.child(this.button(t, "closepane", "Close pane", () => run("pane.close", {}))));
+    const color = this.groupColor(t, tr.group), nx = this.next(tr), gh = this.repoUrl();
+    const tabs = [["design", "Design"], ["plan", "Plan"], ["pr", tr.pr ? `PR #${tr.pr.number}${tr.pr.isDraft ? " (draft)" : ""}` : "PR"], ["issues", `Issues (${tr.issues.length})`]];
+    const tabEl = (k, l) => div().id(`t-${k}`).px(10).py(7).text_size(12.5).cursor_pointer().border_b(2).border_color(this.tab === k ? t.accent : NONE).text_color(this.tab === k ? t.foreground : t.muted).child(l)
+      .on_click((_e, cx) => { if (this.editing) return; this.tab = k; cx.notify(); });
+    const doc = (key) => {
+      const d = this.docs[key];
+      if (!tr[key]) return v_flex().p(12).gap(8).child(div().text_color(t.dim).child(`no ${key} on this branch yet`)).child(this.button(t, `mk-${key}`, key === "design" ? "Brainstorm" : "Plan", () => this.openAgent(tr.path, key === "design" ? "/forge:brainstorm" : "/forge:plan"), true));
+      if (!d) return this.empty(t, "loading…");
+      if (this.editing) return Editor.new(this.editor).flex_1().min_h(0);
+      const body = v_flex().flex_1().min_h(0).child(TextView.markdown(`doc-${key}`, d.text).selectable().scrollable());
+      if (key !== "plan") return body;
+      const tasks = planTasks(d.text, tr.pr?.body);
+      const blocked = tr.agents.find((a) => a.status === "blocked");
+      return v_flex().flex_1().min_h(0)
+        .when(blocked, (e) => e.child(h_flex().mx(12).mt(8).p(8).gap(8).items_center().rounded(6).bg(alpha(t.blocked, "14")).border(1).border_color(alpha(t.blocked, "66"))
+          .child(div().flex_1().text_size(12).text_color(t.blocked).child("The build is waiting on you in its tab."))
+          .child(this.button(t, "ans", "Answer", () => run("agent.focus", { terminal: blocked.address }), true))))
+        .child(v_flex().px(12).py(8).gap(3).children(tasks.map((k) => h_flex().gap(8).items_center().text_size(12.5)
+          .child(MONO(div()).w(16).text_color(k.done ? t.ansi2 : t.dim).child(k.done ? "✓" : "○"))
+          .child(MONO(div()).text_color(t.muted).child(`T${k.n}`))
+          .child(div().flex_1().truncate().text_color(k.done ? t.muted : t.foreground).child(k.title)))))
+        .child(body);
+    };
+    const prTab = () => !tr.pr ? this.empty(t, "no PR yet — the build opens a draft PR as its first step")
+      : v_flex().flex_1().min_h(0).p(12).gap(8)
+        .child(h_flex().gap(8).items_center().child(div().font_semibold().flex_1().truncate().child(tr.pr.title)).child(div().text_size(11).text_color(t.muted).child(tr.pr.state.toLowerCase())).child(this.link(t, "prgh", "Open on GitHub", tr.pr.url)))
+        .child(TextView.markdown("pr-body", tr.pr.body ?? "").selectable().scrollable());
+    const issuesTab = () => v_flex().p(8).gap(2).children(tr.issues.length ? tr.issues.map((n) => {
+      const i = this.data.issues.find((x) => x.number === n);
+      return h_flex().id(`li-${n}`).px(8).py(6).rounded(6).gap(8).items_center().hover((e) => e.bg(t.hover))
+        .child(MONO(div()).text_size(11).text_color(t.muted).child(`#${n}`))
+        .child(div().flex_1().truncate().child(i?.title ?? "(closed or not loaded)"))
+        .child(this.link(t, `ligh-${n}`, "Open on GitHub", i?.url ?? `${gh}/issues/${n}`));
+    }) : [this.empty(t, "no linked issues")]);
+    const rail = v_flex().w(220).p(12).gap(14).border_l(1).border_color(t.border).text_size(12)
+      .child(v_flex().gap(4).child(div().text_size(10.5).font_semibold().text_color(t.muted).child("WAITING ON")).child(div().text_color(tr.group === "needs" ? t.blocked : t.foreground).child(tr.reason)))
+      .child(v_flex().gap(4).child(div().text_size(10.5).font_semibold().text_color(t.muted).child("NEXT")).child(this.button(t, "rnx", nx.label, nx.go, true)))
+      .child(v_flex().gap(4).child(div().text_size(10.5).font_semibold().text_color(t.muted).child("AGENTS ON THIS TRACK"))
+        .children(tr.agents.length ? tr.agents.map((a) => h_flex().id(`ag-${a.address}`).gap(6).items_center().cursor_pointer().hover((e) => e.text_color(t.accent)).on_click(() => run("agent.focus", { terminal: a.address }))
+          .child(div().w(7).h(7).rounded(4).bg(t[a.status] ?? t.idle)).child(MONO(div()).child(a.address)).child(div().text_color(t.muted).child(a.status))) : [div().text_color(t.dim).child("none")]))
+      .child(v_flex().gap(4).child(div().text_size(10.5).font_semibold().text_color(t.muted).child("ACTIVITY"))
+        .children(this.log.length ? this.log.map(([h, s, when]) => v_flex().child(div().truncate().child(s)).child(MONO(div()).text_size(10.5).text_color(t.dim).child(`${h} · ${when}`))) : [div().text_color(t.dim).child("no commits yet")]));
+    const canEdit = (this.tab === "design" || this.tab === "plan") && this.docs[this.tab];
+    return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground)
+      .child(h_flex().px(12).py(8).gap(8).items_center().border_b(1).border_color(t.border)
+        .child(div().font_semibold().text_size(14).child(tr.slug))
+        .child(MONO(div()).text_size(11).text_color(t.muted).child(tr.branch))
+        .when(tr.pr, (e) => e.child(this.link(t, "hpr", `PR #${tr.pr.number}`, tr.pr.url)))
+        .children(tr.issues.slice(0, 3).map((n) => this.link(t, `hi-${n}`, `#${n}`, `${gh}/issues/${n}`)))
+        .child(h_flex().flex_1())
+        .child(this.pips(t, tr.stage, color))
+        .child(div().px(6).py(1).rounded(9).text_size(10.5).bg(alpha(color, "22")).text_color(color).child(STAGES[tr.stage]))
+        .when(tr.stage < 5, (e) => e.child(this.button(t, "shelve", "Shelve → issue", () => this.shelve(tr)))))
+      .child(h_flex().flex_1().min_h(0).items_stretch()
+        .child(v_flex().flex_1().min_w(0)
+          .child(h_flex().px(8).items_center().border_b(1).border_color(t.border).children(tabs.map(([k, l]) => tabEl(k, l))).child(h_flex().flex_1())
+            .when(this.saveMsg, (e) => e.child(div().px(8).text_size(11).text_color(t.muted).child(this.saveMsg)))
+            .when(canEdit && !this.editing, (e) => e.child(this.button(t, "edit", "Edit", (cx) => this.edit(cx))))
+            .when(this.editing, (e) => e.child(this.button(t, "cancel", "Cancel", (cx) => { this.editing = false; this.editor = null; cx.notify(); })).child(this.button(t, "save", "Save", (cx) => cx.spawn((cx) => this.save(cx)), true))))
+          .child(this.tab === "design" ? doc("design") : this.tab === "plan" ? doc("plan") : this.tab === "pr" ? prTab() : issuesTab()))
+        .child(rail));
+  }
   initStart(cx) {
     this.mode = "issue"; this.sel = props().issue ?? null; this.alsoIssue = true; this.busy = null;
     this.title = InputState.new({ placeholder: "e.g. Shelve a track with a reason" });
@@ -303,7 +412,6 @@ export default class Forge extends View {
         .child(this.button(t, "cancel", "Cancel", () => this.dismiss()))
         .child(this.button(t, "go", this.mode === "issue" ? (sel ? `Start from #${sel.number}` : "Start") : "Start", (cx) => { if (!this.busy?.endsWith("…")) cx.spawn((cx) => this.start(cx)); }, true)));
   }
-  initDetail(cx) {}
 
   render(cx) {
     const p = props() ?? {};
