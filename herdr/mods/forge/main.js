@@ -179,8 +179,8 @@ export default class Forge extends View {
 
   // --- actions: every write is an agent's or the person's, never the panel's bookkeeping ---
   // Harness-agnostic: the agent is Herdr's most-picked installed one (knownAgents is ordered that way); no model choice here.
-  async openAgent(path, task) {
-    const argv = (await knownAgents({ on: this.on })).find((a) => a.installed)?.run ?? ["claude"];
+  async openAgent(path, task, argv) {
+    argv ??= (await knownAgents({ on: this.on })).find((a) => a.installed)?.run ?? ["claude"];
     const space = spaces().find((s) => s.folder === path && (s.machine ?? null) === this.on); // ponytail: folder match; a space made by Start/worktree mod has exactly this folder
     if (space) run("tab.new", { space: space.id, argv, task }); else run("space.new", { folder: path, machine: this.on, argv, task });
   }
@@ -497,6 +497,7 @@ export default class Forge extends View {
     try {
       let branch = branchFor(issue, title);
       this.busy = "Creating worktree…"; cx.notify();
+      const argv = (await knownAgents({ on: this.on })).find((a) => a.installed)?.run ?? ["claude"]; // before worktree add: an unreachable machine fails here, not after the worktree exists
       await this.git(["fetch", "-q", "origin", "main"]);
       const has = async (b) => (await this.git(["show-ref", "--verify", "--quiet", `refs/heads/${b}`])).ok;
       const onOrigin = async (b) => { // exit 2 = no such branch; anything else non-zero (network, auth) must not pass for "absent"
@@ -522,7 +523,7 @@ export default class Forge extends View {
       if (r.code !== 0) { this.busy = (r.stderr || "git worktree add failed").trim(); cx.notify(); return; }
       const extra = this.mode === "issue" ? "" : this.brief.value().trim();
       const task = issue ? `/forge:start #${issue.number}` : `/forge:start ${title}${extra ? `\n\n${extra}` : ""}${this.alsoIssue ? "\n\nAlso open a GitHub issue for this so it shows in the backlog if it stalls." : ""}`;
-      await this.openAgent(path, task);
+      await this.openAgent(path, task, argv);
       this.dismiss();
     } catch (e) { this.busy = String(e?.message ?? e); cx.notify(); }
   }
