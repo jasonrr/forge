@@ -39,3 +39,4 @@ Thread the shown space's machine through the panel. Herdr already supports this:
 - T1 commit 10f9cdb — deviation: none — parked: none
 - T2 commit 8786c38 (+ review fix 2b525c6) — deviation: review added two guards the plan missed: location() returns no cwd while the active remote space is absent from spaces(), and a local exec rejection (missing cwd) counts as not-a-repo rather than unreachable — parked: none
 - T3 commit b5faf69 (+ review fix 906803f) — deviation: Start resolves the agent (knownAgents on the machine) before git worktree add, so an unreachable machine fails before a worktree exists — parked: none
+- T4 commit 0dab751 (+ review fix 0aea823) — deviation: a failed remote re-read keeps the last good doc, and remote reloads run one at a time — parked: none
