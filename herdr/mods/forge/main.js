@@ -183,11 +183,126 @@ export default class Forge extends View {
           .child(div().child(this.fetched ? `watching docs/ · PRs ${ago(this.fetched / 1000)} ago` : "loading…"))));
   }
 
-  renderBoard(cx) { return div().id("root").size_full().bg(theme().surface).p(12).child("board"); }
+  renderBoard(cx) {
+    const t = theme(), all = this.live(), q = this.search.value().trim().toLowerCase();
+    const groups = grouped(all.filter((s) => !q || `${s.slug} ${s.branch} ${s.reason}`.toLowerCase().includes(q))).filter((g) => this.filter === "all" || g.key === this.filter);
+    const chips = [["all", "All"], ["needs", "Needs you"], ["flight", "In flight"], ["hold", "On hold"], ["done", "Done"]];
+    const card = (g, s) => {
+      const color = this.groupColor(t, g.key), nx = this.next(s);
+      const art = (label, file) => div().px(6).py(1).rounded(4).text_size(10.5).border(1).border_color(file ? t.border : NONE).when(!file, (e) => e.border_color(t.dim).text_color(t.dim)).child(file ? label : `${label} —`);
+      return v_flex().id(`c-${s.path}`).p(12).gap(8).rounded(8).bg(t.raised).border(1).border_color(g.key === "needs" ? alpha(t.blocked, "66") : t.border).cursor_pointer().hover((e) => e.border_color(t.input))
+        .on_click(() => this.openDetail(s))
+        .child(h_flex().items_center().gap(8)
+          .child(div().font_semibold().flex_1().truncate().child(s.slug))
+          .child(div().px(6).py(1).rounded(9).text_size(10.5).bg(alpha(color, "22")).text_color(color).child(STAGES[s.stage]))
+          .child(MONO(div()).text_size(11).text_color(t.muted).child(s.branch)))
+        .child(h_flex().gap(6).items_center()
+          .child(art("design", s.design)).child(art("plan", s.plan))
+          .when(s.pr, (e) => e.child(this.link(t, `pr-${s.path}`, `PR #${s.pr.number}${s.pr.isDraft ? " draft" : ""}`, s.pr.url)))
+          .children(s.issues.slice(0, 3).map((n) => this.link(t, `i-${s.path}-${n}`, `#${n}`, `${this.repoUrl()}/issues/${n}`))))
+        .when(s.progress.total > 0, (e) => e.child(h_flex().items_center().gap(8)
+          .child(div().flex_1().h(4).rounded(2).bg(t.border).child(div().h(4).rounded(2).bg(color).w(`${Math.round(100 * s.progress.done / s.progress.total)}%`)))
+          .child(MONO(div()).text_size(10.5).text_color(t.muted).child(`${s.progress.done}/${s.progress.total}`))))
+        .child(h_flex().items_center().gap(8)
+          .child(div().w(8).h(8).rounded(4).bg(s.agents.length ? color : t.idle))
+          .child(div().flex_1().truncate().text_size(11.5).text_color(g.key === "needs" ? t.blocked : t.muted).child(s.agents.length ? `${s.agents.length} agent${s.agents.length > 1 ? "s" : ""} · ${s.reason}` : `${s.reason} · ${ago(s.at)}`))
+          .child(this.button(t, `nx-${s.path}`, nx.label, nx.go, true))
+          .when(s.stage < 5, (e) => e.child(this.button(t, `sh-${s.path}`, "Shelve", () => this.shelve(s)))));
+    };
+    const counts = grouped(all).map((g) => `${g.items.length} ${g.title.toLowerCase()}`).join(" · ");
+    return v_flex().id("root").size_full().bg(t.canvas).text_size(13).text_color(t.foreground)
+      .child(this.header(t, "Forge", [
+        div().w(220).h(28).px(8).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.surface).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().w_full().text_size(12)),
+        ...chips.map(([k, l]) => this.button(t, `f-${k}`, l, (cx) => { this.filter = k; cx.notify(); }).when(this.filter === k, (e) => e.bg(t.selection))),
+        this.button(t, "start", "Start work", () => this.openStart(), true),
+      ]))
+      .child(h_flex().px(12).py(6).gap(12).text_size(11.5).text_color(t.muted).items_center()
+        .child(div().child(counts))
+        .child(h_flex().flex_1())
+        .child(this.button(t, "backlog", `View backlog · ${this.data.issues.length} open issues`, () => this.openBacklog()).bg(NONE).text_color(t.ansi12)))
+      .when(this.error, (el) => el.child(this.empty(t, this.error)))
+      .child(v_flex().flex_1().overflow_y_scroll().px(12).pb(12).gap(16).children(groups.map((g) =>
+        v_flex().gap(8)
+          .child(h_flex().gap(6).items_center()
+            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(g.title.toUpperCase()))
+            .child(MONO(div()).text_size(10.5).text_color(t.muted).child(String(g.items.length))))
+          .children(g.items.length ? g.items.map((s) => card(g, s)) : [this.empty(t, "none")]))));
+  }
   renderBacklog(cx) { return div().id("root").size_full().bg(theme().surface).p(12).child("backlog"); }
   renderDetail(cx) { return div().id("root").size_full().bg(theme().surface).p(12).child("detail"); }
-  renderStart(cx) { return div().id("root").size_full().bg(theme().surface).p(12).child("start"); }
-  initStart(cx) {}
+  initStart(cx) {
+    this.mode = "issue"; this.sel = props().issue ?? null; this.alsoIssue = true; this.busy = null;
+    this.title = InputState.new({ placeholder: "e.g. Shelve a track with a reason" });
+    this.title.on("change", (_e, cx) => cx.notify());
+    this.brief = TextareaState.new({ placeholder: "Links, constraints, what you already ruled out…", rows: 6 });
+  }
+  // Always a worktree (the design: a track is a worktree), at Herdr's path so the spaces sidebar nests it under the repo.
+  // Then one agent tab there with /forge:start — the agent decides debug / brainstorm / plan / build by reading.
+  async start(cx) {
+    const issue = this.mode === "issue" ? this.data.issues.find((i) => i.number === this.sel) : null;
+    const title = this.mode === "issue" ? issue?.title : this.title.value().trim();
+    if (!title) { this.busy = "Pick an issue or type a title."; cx.notify(); return; }
+    const branch = branchFor(issue, title), path = `${home()}/.herdr/worktrees/${this.repoName()}/${branch.replace(/\//g, "-")}`; // Herdr's worktree path rule: branch with / as -
+    this.busy = "Creating worktree…"; cx.notify();
+    await this.git(["fetch", "-q", "origin", "main"]);
+    const exists = (await this.git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).ok;
+    const r = await exec("git", [...GIT, "worktree", "add", ...(exists ? [path, branch] : ["--no-track", "-b", branch, path, this.base])], { cwd: this.root });
+    if (r.code !== 0) { this.busy = (r.stderr || "git worktree add failed").trim(); cx.notify(); return; }
+    const extra = this.mode === "issue" ? "" : this.brief.value().trim();
+    const task = issue ? `/forge:start #${issue.number}` : `/forge:start ${title}${extra ? `\n\n${extra}` : ""}${this.alsoIssue ? "\n\nAlso open a GitHub issue for this so it shows in the backlog if it stalls." : ""}`;
+    await this.openAgent(path, task);
+    this.dismiss();
+  }
+  dismiss() { if (props().overlay) closeOverlay(props().overlay); else run("tab.close", { confirmed: true }); } // the dialog also works as a tab (scriptable check); NOT named close(): close(cx) is Herdr's lifecycle hook, called when this tab or pane goes
+  renderStart(cx) {
+    const t = theme(), taken = takenIssues(this.live()), q = this.search.value().trim().toLowerCase();
+    const issues = this.data.issues.filter((i) => !q || `#${i.number} ${i.title}`.toLowerCase().includes(q));
+    const sel = this.data.issues.find((i) => i.number === this.sel) ?? null;
+    const tab = (k, l) => div().id(`m-${k}`).px(12).py(8).text_size(13).cursor_pointer().border_b(2).border_color(this.mode === k ? t.accent : NONE).text_color(this.mode === k ? t.foreground : t.muted).when(this.mode === k, (e) => e.font_semibold()).child(l).on_click((_e, cx) => { this.mode = k; cx.notify(); });
+    const row = (i) => {
+      const tk = taken.get(i.number), on = i.number === this.sel;
+      return v_flex().id(`is-${i.number}`).px(10).py(7).rounded(6).gap(2).cursor_pointer().bg(on ? t.selection : NONE).when(tk, (e) => e.opacity(0.5)).hover((e) => e.bg(on ? t.selection : t.hover))
+        .on_click((_e, cx) => { if (!tk) { this.sel = i.number; cx.notify(); } })
+        .child(h_flex().items_center().gap(8)
+          .child(div().w(12).h(12).rounded(6).border(1.5).border_color(on ? t.accent : t.idle).bg(on ? t.accent : NONE))
+          .child(MONO(div()).text_size(11).text_color(t.muted).child(`#${i.number}`))
+          .child(div().flex_1().truncate().font_medium().child(i.title))
+          .when(kind(i), (e) => e.child(div().px(6).rounded(9).text_size(10.5).bg(alpha(t.ansi5, "22")).text_color(t.ansi5).child(kind(i))))
+          .child(div().px(6).rounded(9).text_size(10.5).bg(isParked(i) ? alpha(t.accent, "22") : t.border).text_color(isParked(i) ? t.ansi12 : t.muted).child(isParked(i) ? "agent" : i.author?.login ?? ""))
+          .child(MONO(div()).w(28).text_size(11).text_color(t.muted).child(since(i.createdAt))))
+        .when(tk, (e) => e.child(div().pl(26).text_size(11).text_color(t.muted).child(`already in track "${tk}" — open it instead`)));
+    };
+    const footer = this.mode === "issue"
+      ? (sel ? `Worktree ${branchFor(sel)}${/Branch: `/.test(sel.body ?? "") ? " (resumes the shelved branch)" : ""} · agent tab opens there with #${sel.number}` : "Pick an issue")
+      : "Worktree from your one-liner · agent tab opens there with your brief";
+    return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground).rounded(10)
+      .child(this.header(t, "Start work", [this.button(t, "close", "✕", () => this.dismiss())]))
+      .child(h_flex().px(16).border_b(1).border_color(t.border).child(tab("issue", "From an issue")).child(tab("scratch", "From scratch")))
+      .when(this.mode === "issue", (el) => el
+        .child(h_flex().px(16).py(10).gap(8).items_center()
+          .child(div().flex_1().h(28).px(8).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.canvas).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().w_full().text_size(12)))
+          .child(div().text_size(12).text_color(t.muted).child(`${this.data.issues.length} open · ${[...taken.keys()].filter((n) => this.data.issues.some((i) => i.number === n)).length} already in a track`)))
+        .child(v_flex().flex_1().overflow_y_scroll().px(8).gap(2).children(issues.length ? issues.map(row) : [this.empty(t, "no open issues")]))
+        .when(sel, (e) => e.child(v_flex().px(16).py(12).gap(8).border_t(1).border_color(t.border).bg(t.canvas)
+          .child(h_flex().items_baseline().gap(8)
+            .child(MONO(div()).text_size(11).text_color(t.muted).child(`#${sel.number}`))
+            .child(div().font_semibold().flex_1().truncate().child(sel.title))
+            .child(this.link(t, "gh", "View on GitHub", sel.url)))
+          .child(div().text_size(12.5).text_color(t.muted).max_h(60).overflow_hidden().child((sel.body ?? "").split("\n").filter(Boolean).slice(0, 3).join(" ")))
+          .child(div().text_size(12).text_color(t.muted).child("The agent reads the issue and picks how to begin: a bug starts with debug, a feature with brainstorm; a design or plan already on a branch is resumed. Nothing to choose here.")))))
+      .when(this.mode === "scratch", (el) => el.child(v_flex().flex_1().px(16).py(16).gap(14)
+        .child(div().text_size(12).text_color(t.muted).child("What is it? One line — this becomes the slug"))
+        .child(div().h(32).px(10).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.canvas).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.title).h_full().w_full().text_size(13)))
+        .child(div().text_size(12).text_color(t.muted).child("Anything the agent should know (optional)"))
+        .child(div().flex_1().min_h(120).p(8).rounded(6).border(1).border_color(t.input).bg(t.canvas).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Textarea.new(this.brief).w_full().h_full().text_size(12.5)))
+        .child(h_flex().id("also").gap(8).items_center().cursor_pointer().on_click((_e, cx) => { this.alsoIssue = !this.alsoIssue; cx.notify(); })
+          .child(div().w(14).h(14).rounded(3).border(1).border_color(t.input).bg(this.alsoIssue ? t.accent : NONE))
+          .child(div().text_size(12.5).child("Also open an issue so it shows in the backlog if this stalls")))))
+      .child(h_flex().px(16).py(12).gap(8).items_center().border_t(1).border_color(t.border)
+        .child(div().flex_1().text_size(12).text_color(this.busy && !this.busy.endsWith("…") ? t.blocked : t.muted).child(this.busy ?? footer))
+        .child(this.button(t, "cancel", "Cancel", () => this.dismiss()))
+        .child(this.button(t, "go", this.mode === "issue" ? (sel ? `Start from #${sel.number}` : "Start") : "Start", (cx) => { if (!this.busy?.endsWith("…")) cx.spawn((cx) => this.start(cx)); }, true)));
+  }
   initDetail(cx) {}
 
   render(cx) {
