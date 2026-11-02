@@ -228,7 +228,47 @@ export default class Forge extends View {
             .child(MONO(div()).text_size(10.5).text_color(t.muted).child(String(g.items.length))))
           .children(g.items.length ? g.items.map((s) => card(g, s)) : [this.empty(t, "none")]))));
   }
-  renderBacklog(cx) { return div().id("root").size_full().bg(theme().surface).p(12).child("backlog"); }
+  renderBacklog(cx) {
+    const t = theme(), q = this.search.value().trim().toLowerCase(), taken = takenIssues(this.live()), me = this.data.me;
+    const labels = (i) => (i.labels ?? []).map((l) => l.name);
+    const shelved = this.data.issues.filter((i) => labels(i).includes("shelved") && !taken.has(i.number)); // already resumed → it is a track, not a shelf
+    const pass = (i) => this.filter === "all" || (this.filter === "bug" && kind(i) === "bug") || (this.filter === "feature" && kind(i) === "feature") || (this.filter === "agent" && isParked(i)) || (this.filter === "yours" && i.author?.login === me);
+    const rows = this.data.issues.filter((i) => !labels(i).includes("shelved") && pass(i) && (!q || `#${i.number} ${i.title} ${i.body ?? ""}`.toLowerCase().includes(q)));
+    const chips = [["all", "All"], ["bug", "Bugs"], ["feature", "Features"], ["agent", "Parked by agents"], ["yours", "Yours"]];
+    const cell = (w, el) => div().w(w).flex_none().child(el);
+    const row = (i) => {
+      const tk = taken.get(i.number), k = kind(i), parked = isParked(i);
+      const from = /From (PR #\d+|review of PR #\d+)|Deferred from design ([^\s]+)|Filed from the (plan|build)/.exec(i.body ?? "")?.[0] ?? "";
+      return h_flex().id(`b-${i.number}`).px(8).py(6).gap(10).items_center().rounded(6).hover((e) => e.bg(t.hover)).when(tk, (e) => e.opacity(0.55))
+        .child(cell(64, this.link(t, `bl-${i.number}`, `#${i.number}`, i.url)))
+        .child(cell(72, k ? div().px(6).rounded(9).text_size(10.5).bg(k === "bug" ? alpha(t.blocked, "22") : alpha(t.ansi5, "22")).text_color(k === "bug" ? t.blocked : t.ansi5).child(k) : div()))
+        .child(v_flex().flex_1().min_w(0).child(div().truncate().font_medium().child(i.title)).child(div().truncate().text_size(11).text_color(t.muted).child((i.body ?? "").split("\n").find(Boolean) ?? "")))
+        .child(cell(150, div().truncate().text_size(11).text_color(t.muted).child(tk ? `in track "${tk}"` : from)))
+        .child(cell(60, div().px(6).rounded(9).text_size(10.5).bg(parked ? alpha(t.accent, "22") : t.border).text_color(parked ? t.ansi12 : t.muted).child(parked ? "agent" : i.author?.login === me ? "you" : i.author?.login ?? "")))
+        .child(cell(32, MONO(div()).text_size(11).text_color(t.muted).child(since(i.createdAt))))
+        .child(cell(56, tk ? div() : this.button(t, `st-${i.number}`, "Start", () => this.openStart(i))));
+    };
+    return v_flex().id("root").size_full().bg(t.canvas).text_size(13).text_color(t.foreground)
+      .child(this.header(t, "Backlog", [
+        div().w(240).h(28).px(8).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.surface).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().w_full().text_size(12)),
+        ...chips.map(([k, l]) => this.button(t, `f-${k}`, l, (cx) => { this.filter = k; this.shown = 50; cx.notify(); }).when(this.filter === k, (e) => e.bg(t.selection))),
+        this.button(t, "board", "Board", () => this.openBoard()),
+      ]))
+      .when(shelved.length, (el) => el.child(v_flex().mx(12).mt(10).p(10).gap(6).rounded(8).bg(t.surface).border(1).border_color(alpha(t.ansi5, "66"))
+        .child(div().text_size(10.5).font_semibold().text_color(t.ansi5).child("SHELVED WORK — a branch is waiting"))
+        .children(shelved.map((i) => h_flex().id(`sh-${i.number}`).gap(10).items_center().py(3)
+          .child(this.link(t, `shl-${i.number}`, `#${i.number}`, i.url))
+          .child(div().flex_1().truncate().child(i.title))
+          .child(MONO(div()).text_size(11).text_color(t.muted).child(since(i.createdAt)))
+          .child(this.button(t, `rs-${i.number}`, "Resume", () => this.openStart(i), true))))))
+      .child(v_flex().flex_1().overflow_y_scroll().px(12).py(10).gap(1)
+        .child(h_flex().px(8).pb(4).gap(10).text_size(10.5).font_semibold().text_color(t.muted)
+          .child(cell(64, div().child("ISSUE"))).child(cell(72, div().child("KIND"))).child(div().flex_1().child("TITLE")).child(cell(150, div().child("PARKED FROM"))).child(cell(60, div().child("BY"))).child(cell(32, div().child("AGE"))).child(cell(56, div())))
+        .children(rows.length ? rows.slice(0, this.shown).map(row) : [this.empty(t, this.data.issues.length ? "nothing matches" : "no open issues")])
+        .child(h_flex().px(8).py(10).gap(12).items_center().text_size(11.5).text_color(t.muted)
+          .child(div().child(`showing ${Math.min(this.shown, rows.length)} of ${rows.length}`))
+          .when(rows.length > this.shown, (e) => e.child(this.button(t, "more", "Load 50 more", (cx) => { this.shown += 50; cx.notify(); })))));
+  }
   initDetail(cx) {
     this.tab = "design"; this.docs = {}; this.editing = false; this.editor = null; this.saveMsg = null; this.log = [];
     cx.spawn(async (cx) => { for (;;) { try { await watchFolder(`${props().track}/docs`); } catch { return; } if (!this.editing) { this.docs = {}; this.loadDoc(cx); } } }); // ends when the worktree goes; while editing, save() reconciles instead
