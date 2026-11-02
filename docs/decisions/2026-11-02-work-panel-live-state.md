@@ -30,3 +30,7 @@ Facts chips stay (design, plan, PR, issues) and the plan checklist bar stays. `n
 ## Open questions
 
 None blocking. Two Herdr feedback items drafted via `herdr-app feedback` (the person reviews and sends): expose the agent's status message in `agents()` so the `hc get` poll can go; a panel registration so a mod can get a tab-bar button without forking `tabs-plus`.
+
+## Deviations
+
+- T1 commit 6dddd78, 8a0f27a — deviation: review fix added (an OPEN PR wins over an older MERGED one on a reused branch; the plan took the first non-closed PR in input order). Review findings on nextLabel for merged tracks and null-path ids dropped: Task 3 `next()` handles merged/PR-only items first, and ids key by PR number — parked: none
