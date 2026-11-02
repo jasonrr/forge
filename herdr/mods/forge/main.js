@@ -6,7 +6,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
 import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, hc, layout, setShared, shared } from "herdr";
 import { writeFile, mkdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app (AGENTS.md "Other built-ins")
-import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch, DONE_WINDOW_MS } from "./model.js";
+import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, agentsOn, grouped, takenIssues, isParked, branchFor, shelfBranch, DONE_WINDOW_MS } from "./model.js";
 const DONE_SUFFIX = ` · ${DONE_WINDOW_MS / 86400000} DAYS`;
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
@@ -24,14 +24,14 @@ function location() {
   const space = spaces().find((s) => s.active), f = focused();
   const all = panes(), pane = f?.pane ? all.find((p) => p.pane === f.pane) : null;
   const sibling = f?.tab ? all.find((p) => p.tab === f.tab && p.cwd) : null;
-  return { cwd: pane?.cwd || f?.cwd || sibling?.cwd || space?.folder, space: space?.id };
+  return { cwd: pane?.cwd || f?.cwd || sibling?.cwd || space?.folder, space: space?.id, machine: space?.machine ?? null };
 }
 
 const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, ahead: {}, me: null, repoUrl: null });
 
 export default class Forge extends View {
   init(_p, cx) {
-    this.root = props()?.root ?? null; this.base = "origin/main";
+    this.root = props()?.root ?? null; this.on = props()?.on ?? null; this.ghAt = 0; this.ghRoot = null; this.ghOn = null; this.ghErr = null; this.refreshing = false; this.base = "origin/main";
     this.data = emptyData(); this.seq = 0; this.watchGen = 0; this.watched = "";
     this.w = 0; this.onSize = (size, cx) => { if (Math.abs((this.w ?? 0) - size.width) >= 1) { this.w = size.width; cx.notify(); } }; // container width: the views branch on narrow()
     this.filter = "all"; this.shown = 50; this.error = null; this.msgs = {}; this.polling = false; // each view is its own copy of the mod, so these never collide
@@ -40,66 +40,83 @@ export default class Forge extends View {
     if (props()?.view === "start") this.initStart(cx);
     if (props()?.track) this.initDetail(cx);
     this.refresh(cx);
-    cx.timer.every(GH_EVERY, (cx) => this.refresh(cx)); // the folder watch covers files, agents() re-renders by itself
+    cx.timer.every(GH_EVERY, (cx) => { if (!this.refreshing) this.refresh(cx); }); // the folder watch covers files, agents() re-renders by itself
     cx.timer.every(5000, (cx) => { this.relocate(cx); cx.spawn((cx) => this.pollMsgs(cx)); }); // the sidebar follows the shown space; agent messages live in herdr-core, not agents()
   }
 
   // --- data ---
-  // exec resolves {code, stdout, stderr} on any exit, but REJECTS when the program or cwd does not exist (a pruned worktree, no gh); never let that kill refresh.
-  async git(args, cwd = this.root) { try { const r = await exec("git", [...GIT, ...args], { cwd }); return { ok: r.code === 0, out: (r.stdout ?? "").replace(/\n+$/, "") }; } catch { return { ok: false, out: "" }; } }
-  async gh(args) { try { const r = await exec("gh", args, { cwd: this.root }); return r.code === 0 ? JSON.parse(r.stdout || "[]") : null; } catch { return null; } }
+  // failed: exec REJECTED (no cwd, no program, machine unreachable) — not the same as git exiting non-zero ("not a repo").
+  async git(args, cwd = this.root, on = this.on) { try { const r = await exec("git", [...GIT, ...args], { cwd, on }); return { ok: r.code === 0, out: (r.stdout ?? "").replace(/\n+$/, "") }; } catch { return { ok: false, out: "", failed: true }; } }
+  async gh(args, cwd = this.root, on = this.on) { try { const r = await exec("gh", args, { cwd, on }); return r.code === 0 ? JSON.parse(r.stdout || "[]") : null; } catch { return null; } }
 
-  // Cheap: one git call, and a full refresh only when the shown repo changed.
+  // Cheap: one git call, and a full refresh only when the shown repo (machine + path) changed. Only refresh() changes this.on.
   relocate(cx) {
     if (props()?.root) return;
-    const { cwd } = location(); if (!cwd || cwd === this.cwd) return;
-    this.cwd = cwd;
-    cx.spawn(async (cx) => { const r = await this.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd); if (r.ok && r.out.replace(/\/\.git$/, "") !== this.root) this.refresh(cx); });
+    const { cwd, machine } = location(); if (!cwd) return;
+    const loc = `${machine ?? ""}\n${cwd}`; if (loc === this.loc) return;
+    this.loc = loc;
+    if (machine !== this.on) { this.refresh(cx); return; } // another machine: always another repo
+    cx.spawn(async (cx) => { const r = await this.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd, machine); if (r.ok && r.out.replace(/\/\.git$/, "") !== this.root) this.refresh(cx); });
   }
+  // Every data reset also forgets the gh cache: an emptied list must never pass for a fresh fetch.
+  resetData() { this.data = emptyData(); this.ghAt = 0; }
   refresh(cx) {
     cx.spawn(async (cx) => {
       const seq = ++this.seq; // a newer refresh (or a repo change) supersedes this one: it must not write its data
-      if (!props()?.root) { // the sidebar follows the shown space; other views are pinned to props().root
-        const { cwd } = location(); if (!cwd) return; this.cwd = cwd;
-        const common = await this.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd);
-        if (!common.ok) { this.root = null; this.data = emptyData(); this.watch([], cx); this.error = "no git repo in this space"; cx.notify(); return; }
-        const r0 = common.out.replace(/\/\.git$/, "");
-        if (r0 !== this.root) { this.root = r0; this.data = emptyData(); } // another repo's PRs, issues and url must never show
-      }
-      const root = this.root;
-      this.base = (await this.git(["rev-parse", "--verify", "-q", "origin/main"])).ok ? "origin/main" : "main";
-      const wt = parseWorktrees((await this.git(["worktree", "list", "--porcelain"])).out);
-      this.watch([`${root}/docs`, ...wt.filter((w) => !w.main).map((w) => `${w.path}/docs`)], cx);
-      const docs = {}, ages = {}, ahead = {};
-      await Promise.all(wt.filter((w) => !w.main).map(async (w) => {
-        const changed = await this.git(["diff", "--name-only", `${this.base}...HEAD`, "--", "docs/decisions", "docs/plans"], w.path);
-        const untracked = await this.git(["ls-files", "--others", "--exclude-standard", "docs/decisions", "docs/plans"], w.path);
-        const files = `${changed.out}\n${untracked.out}`.split("\n").filter(Boolean);
-        const design = files.find((f) => f.startsWith("docs/decisions/")) ?? null, plan = files.find((f) => f.startsWith("docs/plans/")) ?? null;
-        const designText = design ? (await readTextFile(`${w.path}/${design}`).catch(() => "")) ?? "" : "";
-        // (a pruned worktree never gets here: parseWorktrees drops `prunable` blocks)
-        docs[w.path] = { design, plan, designText };
-        ages[w.path] = Number((await this.git(["log", "-1", "--format=%ct"], w.path)).out) || 0;
-        ahead[w.path] = Number((await this.git(["rev-list", "--count", `${this.base}..HEAD`], w.path)).out) || 0;
-      }));
-      // ponytail: per-view throttle — docs/ bursts (builds, rebases) reuse the cached lists; one shared cache across views if several open panels ever matter
-      const ghFresh = this.ghRoot === root && Date.now() - this.ghAt < GH_EVERY - 1000;
-      const [prs, issues] = ghFresh ? [this.data.prs, this.data.issues] : await Promise.all([
-        this.gh(["pr", "list", "--state", "all", "--limit", "200", "--json", "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author"]),
-        this.gh(["issue", "list", "--state", "open", "--limit", "500", "--json", "number,title,body,url,labels,author,createdAt"]),
-      ]);
-      const me = this.data.me || (await exec("gh", ["api", "user", "-q", ".login"], { cwd: this.root }).catch(() => ({}))).stdout?.trim() || null; // || not ??: an empty string must retry next time
-      const repoUrl = this.data.repoUrl || (await exec("gh", ["repo", "view", "--json", "url", "-q", ".url"], { cwd: this.root }).catch(() => ({}))).stdout?.trim() || null;
-      if (seq !== this.seq || root !== this.root) return;
-      this.data = { worktrees: wt, docs, prs: prs ?? this.data.prs, issues: issues ?? this.data.issues, ages, ahead, me, repoUrl };
-      if (!ghFresh) { this.ghAt = Date.now(); this.ghRoot = root; this.error = prs ? null : "gh unavailable — PRs and issues may be stale"; }
-      this.fetched = Date.now();
-      if (props()?.track) this.loadDoc(cx); // the detail pane's first load: track() is null until this data exists
-      cx.notify();
+      this.refreshing = true;
+      try {
+        if (!props()?.root) { // the sidebar follows the shown space; other views are pinned to props().root and props().on
+          const { cwd, machine } = location(); if (!cwd) return; this.loc = `${machine ?? ""}\n${cwd}`;
+          if (machine !== this.on) { this.on = machine; this.root = null; this.resetData(); }
+          const common = await this.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd, machine);
+          if (seq !== this.seq) return;
+          if (common.failed) { this.error = `can't reach ${machine ?? "git"} — showing the last data`; cx.notify(); return; } // unreachable ≠ not a repo: keep what we have
+          if (!common.ok) { this.root = null; this.resetData(); this.watch([], cx, machine); this.error = "no git repo in this space"; cx.notify(); return; }
+          const r0 = common.out.replace(/\/\.git$/, "");
+          if (r0 !== this.root) { this.root = r0; this.resetData(); } // another repo's PRs, issues and url must never show
+        }
+        const root = this.root, on = this.on; // captured: after the first await below, never read this.root / this.on again
+        const git = (args, cwd = root) => this.git(args, cwd, on);
+        this.base = (await git(["rev-parse", "--verify", "-q", "origin/main"])).ok ? "origin/main" : "main";
+        const list = await git(["worktree", "list", "--porcelain"]);
+        if (seq !== this.seq) return;
+        if (!list.ok) { this.error = list.failed ? `can't reach ${on ?? "git"} — showing the last data` : "git worktree list failed — showing the last data"; cx.notify(); return; } // never replace tracks with an empty list
+        const wt = parseWorktrees(list.out);
+        this.watch([`${root}/docs`, ...wt.filter((w) => !w.main).map((w) => `${w.path}/docs`)], cx, on);
+        const docs = {}, ages = {}, ahead = {};
+        await Promise.all(wt.filter((w) => !w.main).map(async (w) => {
+          const changed = await git(["diff", "--name-only", `${this.base}...HEAD`, "--", "docs/decisions", "docs/plans"], w.path);
+          const untracked = await git(["ls-files", "--others", "--exclude-standard", "docs/decisions", "docs/plans"], w.path);
+          const files = `${changed.out}\n${untracked.out}`.split("\n").filter(Boolean);
+          const design = files.find((f) => f.startsWith("docs/decisions/")) ?? null, plan = files.find((f) => f.startsWith("docs/plans/")) ?? null;
+          const designText = design ? (await readTextFile(`${w.path}/${design}`, { on }).catch(() => "")) ?? "" : "";
+          // (a pruned worktree never gets here: parseWorktrees drops `prunable` blocks)
+          docs[w.path] = { design, plan, designText };
+          ages[w.path] = Number((await git(["log", "-1", "--format=%ct"], w.path)).out) || 0;
+          ahead[w.path] = Number((await git(["rev-list", "--count", `${this.base}..HEAD`], w.path)).out) || 0;
+        }));
+        // ponytail: per-view throttle — docs/ bursts (builds, rebases) reuse the cached lists; one shared cache across views if several open panels ever matter
+        const ghFresh = this.ghRoot === root && this.ghOn === on && Date.now() - this.ghAt < GH_EVERY - 1000;
+        const [prs, issues] = ghFresh ? [this.data.prs, this.data.issues] : await Promise.all([
+          this.gh(["pr", "list", "--state", "all", "--limit", "200", "--json", "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author"], root, on),
+          this.gh(["issue", "list", "--state", "open", "--limit", "500", "--json", "number,title,body,url,labels,author,createdAt"], root, on),
+        ]);
+        const me = this.data.me || (await exec("gh", ["api", "user", "-q", ".login"], { cwd: root, on }).catch(() => ({}))).stdout?.trim() || null; // || not ??: an empty string must retry next time
+        const repoUrl = this.data.repoUrl || (await exec("gh", ["repo", "view", "--json", "url", "-q", ".url"], { cwd: root, on }).catch(() => ({}))).stdout?.trim() || null;
+        if (seq !== this.seq || root !== this.root || on !== this.on) return;
+        this.data = { worktrees: wt, docs, prs: prs ?? this.data.prs, issues: issues ?? this.data.issues, ages, ahead, me, repoUrl };
+        if (!ghFresh) { this.ghAt = Date.now(); this.ghRoot = root; this.ghOn = on; this.ghErr = prs ? null : "gh unavailable — PRs and issues may be stale"; }
+        this.error = this.ghErr; // replaces a "can't reach" from an earlier tick; a cached gh failure stays shown
+        this.fetched = Date.now();
+        if (props()?.track) this.loadDoc(cx); // the detail pane's first load: track() is null until this data exists
+        cx.notify();
+      } finally { if (seq === this.seq) this.refreshing = false; } // a superseded refresh must not clear the newer one's flag
     });
   }
   // One loop per docs/ dir (main root + each linked worktree); the set restarts only when the path list changes. A missing dir rejects: wait and retry while the set is current.
-  watch(paths, cx) {
+  // watchFolder is this computer only: a remote root watches nothing and the GH_EVERY refresh picks up its docs. An empty set still ends the old loops.
+  watch(paths, cx, on) {
+    if (on) paths = [];
     const key = paths.join("\n"); if (key === this.watched) return;
     this.watched = key; const gen = ++this.watchGen;
     for (const p of paths) cx.spawn(async (cx) => { while (gen === this.watchGen) { try { await watchFolder(p); if (gen === this.watchGen) this.refresh(cx); } catch { await cx.sleep(5000); } } });
@@ -121,10 +138,10 @@ export default class Forge extends View {
       if (changed) cx.notify();
     } finally { this.polling = false; }
   }
-  // Live: agents() and panes() change on their own and re-render this view; join them to tracks by cwd.
+  // Live: agents() and panes() change on their own and re-render this view; join them to tracks by cwd, on this view's machine only.
   live() {
     const ps = panes();
-    const ag = agents().map((a) => ({ address: a.address, status: a.status, cwd: ps.find((p) => p.pane === a.pane)?.cwd ?? null, msg: this.msgs[a.address] ?? null }));
+    const ag = agentsOn(agents(), spaces(), this.on).map((a) => ({ address: a.address, status: a.status, cwd: ps.find((p) => p.pane === a.pane)?.cwd ?? null, msg: this.msgs[a.address] ?? null }));
     return tracks({ ...this.data, agents: ag });
   }
   track() { return this.live().find((t) => t.path === props().track) ?? null; }
@@ -160,10 +177,10 @@ export default class Forge extends View {
     if (space) run("tab.new", { space: space.id, argv, task }); else run("space.new", { folder: path, argv, task });
   }
   openGitHub(url) { exec("open", [url]); }
-  openBoard() { run("tab.new", { name: "Forge", space: location().space, mod: "forge", props: { view: "board", root: this.root } }); }
-  openBacklog() { run("tab.new", { name: "Backlog", space: location().space, mod: "forge", props: { view: "backlog", root: this.root } }); }
-  openDetail(t) { run("pane.split", { direction: "right", mod: "forge", props: { track: t.path, root: this.root } }); }
-  openStart(issue) { openOverlay({ mod: "forge", props: { view: "start", root: this.root, issue: issue?.number ?? null }, kind: "dialog", width: 720, height: 720 }); }
+  openBoard() { run("tab.new", { name: "Forge", space: location().space, mod: "forge", props: { view: "board", root: this.root, on: this.on } }); }
+  openBacklog() { run("tab.new", { name: "Backlog", space: location().space, mod: "forge", props: { view: "backlog", root: this.root, on: this.on } }); }
+  openDetail(t) { run("pane.split", { direction: "right", mod: "forge", props: { track: t.path, root: this.root, on: this.on } }); }
+  openStart(issue) { openOverlay({ mod: "forge", props: { view: "start", root: this.root, on: this.on, issue: issue?.number ?? null }, kind: "dialog", width: 720, height: 720 }); }
   // The next verb for a track, run by an agent in that worktree.
   next(t) {
     if (!t.path) return { label: "Open PR", go: () => this.openGitHub(t.pr.url) };
