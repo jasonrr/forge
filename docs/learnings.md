@@ -23,3 +23,5 @@
 ## work-panel-live-state (PR #17, 2026-11-02)
 
 - Repointing the mod symlink at a worktree mid-session → fresh tabs load the new code but the already-docked copy keeps the old build (it does not hot-reload across a symlink target change), and `herdr-app shot` returns the last painted frame, which stops changing when the window is not repainting → a plan that verifies the docked panel should have the human reopen it (or restart the app) after the install step, not try to remount it with `layout.hide`/`layout.show` from the CLI.
+- A Done list sourced from `gh pr list --state all` → it includes every author's and every bot's merges; any view built from repo-wide PRs needs an author filter against `gh api user`, decided at design time, not found in review.
+- Picking a branch's PR by state (open, else merged) → a re-created branch name inherits an old merged PR; a design that keys tracks on branch names should say how a reused name is told apart (merge time vs first commit).
