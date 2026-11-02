@@ -181,6 +181,15 @@ test("done: a merged PR within 7 days is a track without a worktree; older or al
   assert.equal(DONE_WINDOW_MS, 7 * 86400 * 1000);
 });
 
+test("done: with a known user only their own merged PRs are Done items; unknown user keeps all", () => {
+  const now = input().now, at = new Date(now - 86400 * 1000).toISOString();
+  const pr = (n, branch, login) => ({ number: n, title: `PR ${n}`, body: "", url: `u${n}`, isDraft: false, state: "MERGED", headRefName: branch, mergedAt: at, author: { login } });
+  const prs = [pr(70, "fix/mine", "jr"), pr(71, "dependabot/npm/x", "dependabot[bot]")];
+  const done = (me) => tracks(input({ prs, me })).filter((t) => t.group === "done").map((t) => t.branch);
+  assert.deepEqual(done("jr"), ["fix/mine"]);
+  assert.deepEqual(done(null).sort(), ["dependabot/npm/x", "fix/mine"]);
+});
+
 test("a worktree whose PR merged is done and dated by the merge, and shows the merged PR", () => {
   const t = tracks(input({ prs: [{ ...input().prs[0], state: "MERGED", mergedAt: "2026-11-01T00:00:00Z" }] })).find((x) => x.branch === "feat/ring");
   assert.equal(t.group, "done"); assert.equal(t.merged, true); assert.equal(t.at, Date.parse("2026-11-01T00:00:00Z") / 1000);

@@ -6,7 +6,8 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
 import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, hc, layout, setShared, shared } from "herdr";
 import { writeFile, mkdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app (AGENTS.md "Other built-ins")
-import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch } from "./model.js";
+import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch, DONE_WINDOW_MS } from "./model.js";
+const DONE_SUFFIX = ` · ${DONE_WINDOW_MS / 86400000} DAYS`;
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const GH_EVERY = 30000; // gh is called at most this often per view (GraphQL budget: 5000 pts/h per user; one refresh ≈ 1 pt per 100 PRs or issues)
@@ -84,7 +85,7 @@ export default class Forge extends View {
       // ponytail: per-view throttle — docs/ bursts (builds, rebases) reuse the cached lists; one shared cache across views if several open panels ever matter
       const ghFresh = this.ghRoot === root && Date.now() - this.ghAt < GH_EVERY - 1000;
       const [prs, issues] = ghFresh ? [this.data.prs, this.data.issues] : await Promise.all([
-        this.gh(["pr", "list", "--state", "all", "--limit", "200", "--json", "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt"]),
+        this.gh(["pr", "list", "--state", "all", "--limit", "200", "--json", "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author"]),
         this.gh(["issue", "list", "--state", "open", "--limit", "500", "--json", "number,title,body,url,labels,author,createdAt"]),
       ]);
       const me = this.data.me || (await exec("gh", ["api", "user", "-q", ".login"], { cwd: this.root }).catch(() => ({}))).stdout?.trim() || null; // || not ??: an empty string must retry next time
@@ -221,7 +222,7 @@ export default class Forge extends View {
       .child(v_flex().flex_1().overflow_y_scroll().px(6).py(8).gap(14).children(groups.map((g) =>
         v_flex().gap(2)
           .child(h_flex().px(6).pb(4).gap(6).items_center()
-            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(g.title.toUpperCase() + (g.key === "done" ? " · 7 DAYS" : "")))
+            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(g.title.toUpperCase() + (g.key === "done" ? DONE_SUFFIX : "")))
             .child(MONO(div()).text_size(10.5).text_color(t.muted).child(String(g.items.length))))
           .children(g.items.length ? g.items.map((s) => row(g, s)) : [this.empty(t, g.key === "needs" ? "nothing waiting on you" : "none")]))))
       .child(v_flex().border_t(1).border_color(t.border)
@@ -275,7 +276,7 @@ export default class Forge extends View {
       .child(v_flex().flex_1().overflow_y_scroll().px(12).pb(12).gap(16).children(groups.map((g) =>
         v_flex().gap(8)
           .child(h_flex().gap(6).items_center()
-            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(g.title.toUpperCase() + (g.key === "done" ? " · 7 DAYS" : "")))
+            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(g.title.toUpperCase() + (g.key === "done" ? DONE_SUFFIX : "")))
             .child(MONO(div()).text_size(10.5).text_color(t.muted).child(String(g.items.length))))
           .children(g.items.length ? g.items.map((s) => card(g, s)) : [this.empty(t, "none")]))));
   }

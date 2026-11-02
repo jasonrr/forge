@@ -112,6 +112,7 @@ export function tracks(input) {
     if (p.state !== "MERGED" || !p.mergedAt || have.has(p.headRefName) || /^(main|master)$/.test(p.headRefName)) continue; // a fork's main merged here would be a Done item named "main"
     const ms = Date.parse(p.mergedAt);
     if (!(now - ms >= 0 && now - ms < DONE_WINDOW_MS)) continue;
+    if (input.me && p.author?.login !== input.me) continue; // teammates' and bots' merged PRs are not this user's Done; unknown me keeps all
     const t = { path: null, branch: p.headRefName, slug: p.headRefName.replace(/^[^/]+\//, ""), design: null, plan: null, pr: p, agents: [], issues: linked(p.body), at: ms / 1000, ahead: 0, merged: true };
     t.group = "done"; t.progress = progress(p.body); t.reason = reason(t);
     ts.push(t);
