@@ -88,7 +88,8 @@ export function tracks(input) {
   const now = input.now ?? Date.now();
   const ts = input.worktrees.filter((w) => !w.main).map((w) => {
     const d = input.docs?.[w.path] ?? {};
-    const pr = w.branch ? (input.prs ?? []).find((p) => p.headRefName === w.branch && p.state !== "CLOSED") ?? null : null; // a shelved track's closed draft PR is history, not state
+    const mine = (input.prs ?? []).filter((p) => p.headRefName === w.branch);
+    const pr = w.branch ? mine.find((p) => p.state === "OPEN") ?? mine.find((p) => p.state === "MERGED") ?? null : null; // a shelved track's closed draft PR is history, not state
     const t = {
       path: w.path, branch: w.branch ?? "(detached)", slug: w.branch ? w.branch.replace(/^[^/]+\//, "") : w.path.split("/").filter(Boolean).pop(),
       design: d.design ?? null, plan: d.plan ?? null, pr,

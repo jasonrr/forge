@@ -186,3 +186,8 @@ test("a worktree whose PR merged is done and dated by the merge, and shows the m
   assert.equal(t.group, "done"); assert.equal(t.merged, true); assert.equal(t.at, Date.parse("2026-11-01T00:00:00Z") / 1000);
   assert.equal(t.reason, "merged · PR #55"); assert.equal(t.path, "/r/.claude/worktrees/ring");
 });
+
+test("a reused branch: an open PR wins over an old merged one listed first", () => {
+  const t = tracks(input({ prs: [{ ...input().prs[0], number: 40, state: "MERGED", mergedAt: "2026-10-01T00:00:00Z" }, input().prs[0]] })).find((x) => x.branch === "feat/ring");
+  assert.equal(t.pr.number, 55); assert.equal(t.merged, false);
+});
