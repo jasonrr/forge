@@ -257,7 +257,7 @@ export default class Forge extends View {
           .child(MONO(div()).text_size(11).text_color(t.muted).child(`${this.data.issues.length} open`)))
         .child(h_flex().px(12).pb(8).gap(8).items_center().text_size(11).text_color(t.muted)
           .child(div().w(6).h(6).rounded(3).bg(this.error ? t.blocked : t.ansi2))
-          .child(div().child(this.fetched ? `watching docs/ · PRs ${ago(this.fetched / 1000)} ago` : "loading…"))));
+          .child(div().child(this.fetched ? `${this.on ? `polling ${this.on}` : "watching docs/"} · PRs ${ago(this.fetched / 1000)} ago` : "loading…"))));
   }
 
   renderBoard(cx) {
