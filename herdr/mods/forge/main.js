@@ -30,6 +30,7 @@ export default class Forge extends View {
   init(_p, cx) {
     this.root = props()?.root ?? null; this.base = "origin/main";
     this.data = emptyData(); this.seq = 0; this.watchGen = 0; this.watched = "";
+    this.w = 0; this.onSize = (size, cx) => { if (Math.abs((this.w ?? 0) - size.width) >= 1) { this.w = size.width; cx.notify(); } }; // container width: the views branch on narrow()
     this.filter = "all"; this.shown = 50; this.error = null; // each view is its own copy of the mod, so these never collide
     this.search = InputState.new({ placeholder: "Search" });
     this.search.on("change", (_e, cx) => cx.notify());
@@ -104,6 +105,7 @@ export default class Forge extends View {
     return tracks({ ...this.data, agents: ag });
   }
   track() { return this.live().find((t) => t.path === props().track) ?? null; }
+  narrow(px) { return this.w > 0 && this.w < px; } // false until the first layout reports a width
   repoName() { return (this.root ?? "").split("/").pop(); }
   repoUrl() { return this.data.repoUrl ?? "https://github.com"; }
 
@@ -147,10 +149,10 @@ export default class Forge extends View {
   }
   groupColor(t, key) { return { needs: t.blocked, flight: t.accent, hold: t.muted, done: t.ansi2 }[key]; }
   header(t, title, right) {
-    return h_flex().px(12).py(8).items_center().gap(8).border_b(1).border_color(t.border)
+    return h_flex().px(12).py(8).items_center().gap(8).flex_wrap().border_b(1).border_color(t.border)
       .child(div().font_semibold().text_size(14).child(title))
-      .child(MONO(div()).text_size(11).text_color(t.muted).child(`${this.repoName()} · ${this.base.replace("origin/", "")}`))
-      .child(h_flex().flex_1()).children(right ?? []);
+      .child(MONO(div()).text_size(11).text_color(t.muted).truncate().min_w(0).child(`${this.repoName()} · ${this.base.replace("origin/", "")}`))
+      .child(h_flex().flex_grow(1).min_w(0).justify_end().items_center().gap(8).flex_wrap().children(right ?? [])); // grows from its content width, so a crowded header wraps this group to a second line
   }
   empty(t, text) { return div().px(8).py(4).text_size(12).text_color(t.dim).child(text); }
 
@@ -161,15 +163,15 @@ export default class Forge extends View {
       const color = this.groupColor(t, g.key), needs = g.key === "needs";
       return v_flex().id(`s-${s.path}`).px(6).py(5).rounded(6).gap(3).cursor_pointer().bg(needs ? alpha(t.blocked, "14") : NONE).hover((e) => e.bg(t.hover))
         .on_click(() => this.openDetail(s))
-        .child(h_flex().items_center().gap(8)
+        .child(h_flex().items_center().gap(8).min_w(0)
           .child(div().w(8).h(8).rounded(4).bg(s.agents.length ? color : t.idle))
-          .child(div().flex_1().truncate().font_medium().child(s.slug))
-          .child(MONO(div()).text_size(10.5).text_color(t.muted).child(s.pr && s.progress.total ? `${s.progress.done}/${s.progress.total}` : s.group === "done" ? `#${s.pr.number}` : ago(s.at))))
-        .child(h_flex().items_center().gap(8).pl(16)
+          .child(div().flex_1().min_w(0).truncate().font_medium().child(s.slug))
+          .child(MONO(div()).text_size(10.5).flex_none().text_color(t.muted).child(s.pr && s.progress.total ? `${s.progress.done}/${s.progress.total}` : s.group === "done" ? `#${s.pr.number}` : ago(s.at))))
+        .child(h_flex().items_center().gap(8).pl(16).min_w(0)
           .child(this.pips(t, s.stage, color))
-          .child(div().flex_1().truncate().text_size(11).text_color(needs ? t.blocked : t.muted).child(s.reason)));
+          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(needs ? t.blocked : t.muted).child(s.reason)));
     };
-    return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground)
+    return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground).on_size_change(this.onSize)
       .child(this.header(t, "Forge", [
         this.button(t, "board", "⤢", () => this.openBoard()),
         this.button(t, "start", "+", () => this.openStart()),
@@ -201,26 +203,26 @@ export default class Forge extends View {
       return v_flex().id(`c-${s.path}`).p(12).gap(8).rounded(8).bg(t.raised).border(1).border_color(g.key === "needs" ? alpha(t.blocked, "66") : t.border).cursor_pointer().hover((e) => e.border_color(t.input))
         .on_click(() => this.openDetail(s))
         .child(h_flex().items_center().gap(8)
-          .child(div().font_semibold().flex_1().truncate().child(s.slug))
-          .child(div().px(6).py(1).rounded(9).text_size(10.5).bg(alpha(color, "22")).text_color(color).child(STAGES[s.stage]))
-          .child(MONO(div()).text_size(11).text_color(t.muted).child(s.branch)))
-        .child(h_flex().gap(6).items_center()
+          .child(div().font_semibold().flex_1().min_w(0).truncate().child(s.slug))
+          .child(div().px(6).py(1).rounded(9).text_size(10.5).flex_none().bg(alpha(color, "22")).text_color(color).child(STAGES[s.stage]))
+          .child(MONO(div()).text_size(11).text_color(t.muted).truncate().min_w(0).flex_shrink(1).child(s.branch)))
+        .child(h_flex().gap(6).items_center().flex_wrap()
           .child(art("design", s.design)).child(art("plan", s.plan))
           .when(s.pr, (e) => e.child(this.link(t, `pr-${s.path}`, `PR #${s.pr.number}${s.pr.isDraft ? " draft" : ""}`, s.pr.url)))
           .children(s.issues.slice(0, 3).map((n) => this.link(t, `i-${s.path}-${n}`, `#${n}`, `${this.repoUrl()}/issues/${n}`))))
         .when(s.progress.total > 0, (e) => e.child(h_flex().items_center().gap(8)
-          .child(div().flex_1().h(4).rounded(2).bg(t.border).child(div().h(4).rounded(2).bg(color).w(`${Math.round(100 * s.progress.done / s.progress.total)}%`)))
+          .child(div().flex_1().min_w(0).h(4).rounded(2).bg(t.border).child(div().h(4).rounded(2).bg(color).w(`${Math.round(100 * s.progress.done / s.progress.total)}%`)))
           .child(MONO(div()).text_size(10.5).text_color(t.muted).child(`${s.progress.done}/${s.progress.total}`))))
         .child(h_flex().items_center().gap(8)
           .child(div().w(8).h(8).rounded(4).bg(s.agents.length ? color : t.idle))
-          .child(div().flex_1().truncate().text_size(11.5).text_color(g.key === "needs" ? t.blocked : t.muted).child(s.agents.length ? `${s.agents.length} agent${s.agents.length > 1 ? "s" : ""} · ${s.reason}` : `${s.reason} · ${ago(s.at)}`))
-          .child(this.button(t, `nx-${s.path}`, nx.label, nx.go, true))
-          .when(s.stage < 5, (e) => e.child(this.button(t, `sh-${s.path}`, "Shelve", () => this.shelve(s)))));
+          .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(g.key === "needs" ? t.blocked : t.muted).child(s.agents.length ? `${s.agents.length} agent${s.agents.length > 1 ? "s" : ""} · ${s.reason}` : `${s.reason} · ${ago(s.at)}`))
+          .child(h_flex().flex_none().gap(8).child(this.button(t, `nx-${s.path}`, nx.label, nx.go, true))
+            .when(s.stage < 5, (e) => e.child(this.button(t, `sh-${s.path}`, "Shelve", () => this.shelve(s))))));
     };
     const counts = grouped(all).map((g) => `${g.items.length} ${g.title.toLowerCase()}`).join(" · ");
-    return v_flex().id("root").size_full().bg(t.canvas).text_size(13).text_color(t.foreground)
+    return v_flex().id("root").size_full().bg(t.canvas).text_size(13).text_color(t.foreground).on_size_change(this.onSize)
       .child(this.header(t, "Forge", [
-        div().w(220).h(28).px(8).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.surface).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().w_full().text_size(12)),
+        div().w(220).min_w(140).flex_shrink(1).h(28).px(8).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.surface).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().w_full().text_size(12)),
         ...chips.map(([k, l]) => this.button(t, `f-${k}`, l, (cx) => { this.filter = k; cx.notify(); }).when(this.filter === k, (e) => e.bg(t.selection))),
         this.button(t, "start", "Start work", () => this.openStart(), true),
       ]))
@@ -244,21 +246,22 @@ export default class Forge extends View {
     const rows = this.data.issues.filter((i) => !labels(i).includes("shelved") && pass(i) && (!q || `#${i.number} ${i.title} ${i.body ?? ""}`.toLowerCase().includes(q)));
     const chips = [["all", "All"], ["bug", "Bugs"], ["feature", "Features"], ["agent", "Parked by agents"], ["yours", "Yours"]];
     const cell = (w, el) => div().w(w).flex_none().child(el);
+    const wide = !this.narrow(640); // below this the KIND, PARKED FROM and BY columns go, header and rows together
     const row = (i) => {
       const tk = taken.get(i.number), k = kind(i), parked = isParked(i);
       const from = /From (PR #\d+|review of PR #\d+)|Deferred from design ([^\s]+)|Filed from the (plan|build)/.exec(i.body ?? "")?.[0] ?? "";
       return h_flex().id(`b-${i.number}`).px(8).py(6).gap(10).items_center().rounded(6).hover((e) => e.bg(t.hover)).when(tk, (e) => e.opacity(0.55))
         .child(cell(64, this.link(t, `bl-${i.number}`, `#${i.number}`, i.url)))
-        .child(cell(72, k ? div().px(6).rounded(9).text_size(10.5).bg(k === "bug" ? alpha(t.blocked, "22") : alpha(t.ansi5, "22")).text_color(k === "bug" ? t.blocked : t.ansi5).child(k) : div()))
+        .when(wide, (e) => e.child(cell(72, k ? div().px(6).rounded(9).text_size(10.5).bg(k === "bug" ? alpha(t.blocked, "22") : alpha(t.ansi5, "22")).text_color(k === "bug" ? t.blocked : t.ansi5).child(k) : div())))
         .child(v_flex().flex_1().min_w(0).child(div().truncate().font_medium().child(i.title)).child(div().truncate().text_size(11).text_color(t.muted).child((i.body ?? "").split("\n").find(Boolean) ?? "")))
-        .child(cell(150, div().truncate().text_size(11).text_color(t.muted).child(tk ? `in track "${tk}"` : from)))
-        .child(cell(90, div().px(6).rounded(9).truncate().text_size(10.5).bg(parked ? alpha(t.accent, "22") : t.border).text_color(parked ? t.ansi12 : t.muted).child(parked ? "agent" : i.author?.login === me ? "you" : i.author?.login ?? "")))
+        .when(wide, (e) => e.child(cell(150, div().truncate().text_size(11).text_color(t.muted).child(tk ? `in track "${tk}"` : from)))
+          .child(cell(90, div().px(6).rounded(9).truncate().text_size(10.5).bg(parked ? alpha(t.accent, "22") : t.border).text_color(parked ? t.ansi12 : t.muted).child(parked ? "agent" : i.author?.login === me ? "you" : i.author?.login ?? ""))))
         .child(cell(32, MONO(div()).text_size(11).text_color(t.muted).child(since(i.createdAt))))
         .child(cell(56, tk ? div() : this.button(t, `st-${i.number}`, "Start", () => this.openStart(i))));
     };
-    return v_flex().id("root").size_full().bg(t.canvas).text_size(13).text_color(t.foreground)
+    return v_flex().id("root").size_full().bg(t.canvas).text_size(13).text_color(t.foreground).on_size_change(this.onSize)
       .child(this.header(t, "Backlog", [
-        div().w(240).h(28).px(8).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.surface).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().w_full().text_size(12)),
+        div().w(240).min_w(140).flex_shrink(1).h(28).px(8).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.surface).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().w_full().text_size(12)),
         ...chips.map(([k, l]) => this.button(t, `f-${k}`, l, (cx) => { this.filter = k; this.shown = 50; cx.notify(); }).when(this.filter === k, (e) => e.bg(t.selection))),
         this.button(t, "board", "Board", () => this.openBoard()),
       ]))
@@ -267,12 +270,12 @@ export default class Forge extends View {
         .child(div().text_size(10.5).font_semibold().text_color(t.ansi5).child("SHELVED WORK — a branch is waiting"))
         .children(shelved.map((i) => h_flex().id(`sh-${i.number}`).gap(10).items_center().py(3)
           .child(this.link(t, `shl-${i.number}`, `#${i.number}`, i.url))
-          .child(div().flex_1().truncate().child(i.title))
+          .child(div().flex_1().min_w(0).truncate().child(i.title))
           .child(MONO(div()).text_size(11).text_color(t.muted).child(since(i.createdAt)))
           .child(this.button(t, `rs-${i.number}`, "Resume", () => this.openStart(i), true))))))
       .child(v_flex().flex_1().overflow_y_scroll().px(12).py(10).gap(1)
         .child(h_flex().px(8).pb(4).gap(10).text_size(10.5).font_semibold().text_color(t.muted)
-          .child(cell(64, div().child("ISSUE"))).child(cell(72, div().child("KIND"))).child(div().flex_1().child("TITLE")).child(cell(150, div().child("PARKED FROM"))).child(cell(90, div().child("BY"))).child(cell(32, div().child("AGE"))).child(cell(56, div())))
+          .child(cell(64, div().child("ISSUE"))).when(wide, (e) => e.child(cell(72, div().child("KIND")))).child(div().flex_1().min_w(0).child("TITLE")).when(wide, (e) => e.child(cell(150, div().child("PARKED FROM"))).child(cell(90, div().child("BY")))).child(cell(32, div().child("AGE"))).child(cell(56, div())))
         .children(rows.length ? rows.slice(0, this.shown).map(row) : [this.empty(t, !this.fetched ? "loading…" : this.data.issues.length ? "nothing matches" : "no open issues")])
         .child(h_flex().px(8).py(10).gap(12).items_center().text_size(11.5).text_color(t.muted)
           .child(div().child(`showing ${Math.min(this.shown, rows.length)} of ${rows.length}`))
@@ -333,7 +336,7 @@ export default class Forge extends View {
     if (!tr) return v_flex().id("root").size_full().bg(t.surface).p(12).gap(8).text_color(t.dim).child(this.data.worktrees.length ? "This track's worktree is gone (shelved or removed)." : "loading…");
     const color = this.groupColor(t, tr.group), nx = this.next(tr), gh = this.repoUrl();
     const tabs = [["design", "Design"], ["plan", "Plan"], ["pr", tr.pr ? `PR #${tr.pr.number}${tr.pr.isDraft ? " (draft)" : ""}` : "PR"], ["issues", `Issues (${tr.issues.length})`]];
-    const tabEl = (k, l) => div().id(`t-${k}`).px(10).py(7).text_size(12.5).cursor_pointer().border_b(2).border_color(this.tab === k ? t.accent : NONE).text_color(this.tab === k ? t.foreground : t.muted).child(l)
+    const tabEl = (k, l) => div().id(`t-${k}`).flex_none().px(10).py(7).text_size(12.5).cursor_pointer().border_b(2).border_color(this.tab === k ? t.accent : NONE).text_color(this.tab === k ? t.foreground : t.muted).child(l)
       .on_click((_e, cx) => { if (this.editing) return; this.tab = k; cx.notify(); });
     const doc = (key) => {
       const d = this.docs[key];
@@ -341,58 +344,65 @@ export default class Forge extends View {
       if (!d) return this.empty(t, "loading…");
       if (d.text === null) return this.empty(t, `can't read ${d.rel}: ${d.err}`);
       if (this.editing) return Editor.new(this.editor).flex_1().min_h(0);
-      const body = v_flex().flex_1().min_h(0).child(TextView.markdown(`doc-${key}`, d.text).selectable().scrollable());
+      const body = v_flex().flex_1().min_h(0).px(16).py(12).child(TextView.markdown(`doc-${key}`, d.text).selectable().scrollable());
       if (key !== "plan") return body;
       const tasks = planTasks(d.text, tr.pr?.body);
       const blocked = tr.agents.find((a) => a.status === "blocked");
       return v_flex().flex_1().min_h(0)
-        .when(blocked, (e) => e.child(h_flex().mx(12).mt(8).p(8).gap(8).items_center().rounded(6).bg(alpha(t.blocked, "14")).border(1).border_color(alpha(t.blocked, "66"))
+        .when(blocked, (e) => e.child(h_flex().mx(16).mt(8).p(8).gap(8).items_center().rounded(6).bg(alpha(t.blocked, "14")).border(1).border_color(alpha(t.blocked, "66"))
           .child(div().flex_1().text_size(12).text_color(t.blocked).child("The build is waiting on you in its tab."))
           .child(this.button(t, "ans", "Answer", () => run("agent.focus", { terminal: blocked.address }), true))))
-        .child(v_flex().px(12).py(8).gap(3).children(tasks.map((k) => h_flex().gap(8).items_center().text_size(12.5)
+        .child(v_flex().px(16).py(8).gap(3).children(tasks.map((k) => h_flex().gap(8).items_center().text_size(12.5)
           .child(MONO(div()).w(16).text_color(k.done ? t.ansi2 : t.dim).child(k.done ? "✓" : "○"))
           .child(MONO(div()).text_color(t.muted).child(`T${k.n}`))
-          .child(div().flex_1().truncate().text_color(k.done ? t.muted : t.foreground).child(k.title)))))
+          .child(div().flex_1().min_w(0).truncate().text_color(k.done ? t.muted : t.foreground).child(k.title)))))
         .child(body);
     };
     const prTab = () => !tr.pr ? this.empty(t, "no PR yet — the build opens a draft PR as its first step")
-      : v_flex().flex_1().min_h(0).p(12).gap(8)
-        .child(h_flex().gap(8).items_center().child(div().font_semibold().flex_1().truncate().child(tr.pr.title)).child(div().text_size(11).text_color(t.muted).child(tr.pr.state.toLowerCase())).child(this.link(t, "prgh", "Open on GitHub", tr.pr.url)))
+      : v_flex().flex_1().min_h(0).px(16).py(12).gap(8)
+        .child(h_flex().gap(8).items_center().child(div().font_semibold().flex_1().min_w(0).truncate().child(tr.pr.title)).child(div().text_size(11).text_color(t.muted).child(tr.pr.state.toLowerCase())).child(this.link(t, "prgh", "Open on GitHub", tr.pr.url)))
         .child(TextView.markdown("pr-body", tr.pr.body ?? "").selectable().scrollable());
     const issuesTab = () => v_flex().p(8).gap(2).children(tr.issues.length ? tr.issues.map((n) => {
       const i = this.data.issues.find((x) => x.number === n);
       return h_flex().id(`li-${n}`).px(8).py(6).rounded(6).gap(8).items_center().hover((e) => e.bg(t.hover))
         .child(MONO(div()).text_size(11).text_color(t.muted).child(`#${n}`))
-        .child(div().flex_1().truncate().child(i?.title ?? "(closed or not loaded)"))
+        .child(div().flex_1().min_w(0).truncate().child(i?.title ?? "(closed or not loaded)"))
         .child(this.link(t, `ligh-${n}`, "Open on GitHub", i?.url ?? `${gh}/issues/${n}`));
     }) : [this.empty(t, "no linked issues")]);
-    const rail = v_flex().w(220).p(12).gap(14).border_l(1).border_color(t.border).text_size(12)
+    const slim = this.narrow(720); // below this the rail goes: reason + Next move under the header
+    const rail = v_flex().w(220).flex_none().p(12).gap(14).border_l(1).border_color(t.border).text_size(12)
       .child(v_flex().gap(4).child(div().text_size(10.5).font_semibold().text_color(t.muted).child("WAITING ON")).child(div().text_color(tr.group === "needs" ? t.blocked : t.foreground).child(tr.reason)))
       .child(v_flex().gap(4).child(div().text_size(10.5).font_semibold().text_color(t.muted).child("NEXT")).child(this.button(t, "rnx", nx.label, nx.go, true)))
       .child(v_flex().gap(4).child(div().text_size(10.5).font_semibold().text_color(t.muted).child("AGENTS ON THIS TRACK"))
         .children(tr.agents.length ? tr.agents.map((a) => h_flex().id(`ag-${a.address}`).gap(6).items_center().cursor_pointer().hover((e) => e.text_color(t.accent)).on_click(() => run("agent.focus", { terminal: a.address }))
           .child(div().w(7).h(7).rounded(4).bg(t[a.status] ?? t.idle)).child(MONO(div()).child(a.address)).child(div().text_color(t.muted).child(a.status))) : [div().text_color(t.dim).child("none")]))
       .child(v_flex().gap(4).child(div().text_size(10.5).font_semibold().text_color(t.muted).child("ACTIVITY"))
-        .children(this.log.length ? this.log.map(([h, s, when]) => v_flex().child(div().truncate().child(s)).child(MONO(div()).text_size(10.5).text_color(t.dim).child(`${h} · ${when}`))) : [div().text_color(t.dim).child("no commits yet")]));
+        .children(this.log.length ? this.log.map(([h, s, when]) => v_flex().min_w(0).child(div().truncate().child(s)).child(MONO(div()).text_size(10.5).text_color(t.dim).child(`${h} · ${when}`))) : [div().text_color(t.dim).child("no commits yet")]));
     const canEdit = (this.tab === "design" || this.tab === "plan") && this.docs[this.tab]?.text != null;
-    return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground)
-      .child(h_flex().px(12).py(8).gap(8).items_center().border_b(1).border_color(t.border)
-        .child(div().font_semibold().text_size(14).child(tr.slug))
-        .child(MONO(div()).text_size(11).text_color(t.muted).child(tr.branch))
+    return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground).on_size_change(this.onSize)
+      .child(h_flex().px(12).py(8).gap(8).items_center().flex_wrap().border_b(1).border_color(t.border)
+        .child(div().font_semibold().text_size(14).truncate().min_w(0).child(tr.slug))
+        .child(MONO(div()).text_size(11).text_color(t.muted).truncate().min_w(0).flex_shrink(1).child(tr.branch))
         .when(tr.pr, (e) => e.child(this.link(t, "hpr", `PR #${tr.pr.number}`, tr.pr.url)))
         .children(tr.issues.slice(0, 3).map((n) => this.link(t, `hi-${n}`, `#${n}`, `${gh}/issues/${n}`)))
-        .child(h_flex().flex_1())
-        .child(this.pips(t, tr.stage, color))
-        .child(div().px(6).py(1).rounded(9).text_size(10.5).bg(alpha(color, "22")).text_color(color).child(STAGES[tr.stage]))
-        .when(tr.stage < 5, (e) => e.child(this.button(t, "shelve", "Shelve → issue", () => this.shelve(tr)))))
+        .child(h_flex().flex_grow(1).justify_end().items_center().gap(8)
+          .child(this.pips(t, tr.stage, color))
+          .child(div().px(6).py(1).rounded(9).text_size(10.5).bg(alpha(color, "22")).text_color(color).child(STAGES[tr.stage]))
+          .when(tr.stage < 5, (e) => e.child(this.button(t, "shelve", "Shelve → issue", () => this.shelve(tr))))))
+      .when(slim, (el) => el.child(h_flex().px(12).py(6).gap(8).items_center().border_b(1).border_color(t.border).text_size(12)
+        .child(div().text_size(10.5).font_semibold().text_color(t.muted).flex_none().child("WAITING ON"))
+        .child(div().flex_1().min_w(0).truncate().text_color(tr.group === "needs" ? t.blocked : t.foreground).child(tr.reason))
+        .child(h_flex().flex_none().child(this.button(t, "rnx", nx.label, nx.go, true)))))
       .child(h_flex().flex_1().min_h(0).items_stretch()
         .child(v_flex().flex_1().min_w(0)
-          .child(h_flex().px(8).items_center().border_b(1).border_color(t.border).children(tabs.map(([k, l]) => tabEl(k, l))).child(h_flex().flex_1())
-            .when(this.saveMsg, (e) => e.child(div().px(8).text_size(11).text_color(t.muted).child(this.saveMsg)))
-            .when(canEdit && !this.editing, (e) => e.child(this.button(t, "edit", "Edit", (cx) => this.edit(cx))))
-            .when(this.editing, (e) => e.child(this.button(t, "cancel", "Cancel", (cx) => { this.editing = false; this.editor = null; this.saveMsg = null; this.docs = {}; this.loadDoc(cx); cx.notify(); })).child(this.button(t, "save", "Save", (cx) => cx.spawn((cx) => this.save(cx)), true))))
+          .child(h_flex().px(8).items_center().gap(8).border_b(1).border_color(t.border)
+            .child(h_flex().id("tabs").flex_1().min_w(0).overflow_x_scroll().children(tabs.map(([k, l]) => tabEl(k, l))))
+            .child(h_flex().flex_none().items_center().gap(8)
+              .when(this.saveMsg, (e) => e.child(div().text_size(11).text_color(t.muted).child(this.saveMsg)))
+              .when(canEdit && !this.editing, (e) => e.child(this.button(t, "edit", "Edit", (cx) => this.edit(cx))))
+              .when(this.editing, (e) => e.child(this.button(t, "cancel", "Cancel", (cx) => { this.editing = false; this.editor = null; this.saveMsg = null; this.docs = {}; this.loadDoc(cx); cx.notify(); })).child(this.button(t, "save", "Save", (cx) => cx.spawn((cx) => this.save(cx)), true)))))
           .child(this.tab === "design" ? doc("design") : this.tab === "plan" ? doc("plan") : this.tab === "pr" ? prTab() : issuesTab()))
-        .child(rail));
+        .when(!slim, (el) => el.child(rail)));
   }
   initStart(cx) {
     this.mode = "issue"; this.sel = props().issue ?? null; this.alsoIssue = true; this.busy = null;
@@ -452,7 +462,7 @@ export default class Forge extends View {
         .child(h_flex().items_center().gap(8)
           .child(div().w(12).h(12).rounded(6).border(1.5).border_color(on ? t.accent : t.idle).bg(on ? t.accent : NONE))
           .child(MONO(div()).text_size(11).text_color(t.muted).child(`#${i.number}`))
-          .child(div().flex_1().truncate().font_medium().child(i.title))
+          .child(div().flex_1().min_w(0).truncate().font_medium().child(i.title))
           .when(kind(i), (e) => e.child(div().px(6).rounded(9).text_size(10.5).bg(alpha(t.ansi5, "22")).text_color(t.ansi5).child(kind(i))))
           .child(div().px(6).rounded(9).text_size(10.5).bg(isParked(i) ? alpha(t.accent, "22") : t.border).text_color(isParked(i) ? t.ansi12 : t.muted).child(isParked(i) ? "agent" : i.author?.login ?? ""))
           .child(MONO(div()).w(28).text_size(11).text_color(t.muted).child(since(i.createdAt))))
@@ -461,7 +471,7 @@ export default class Forge extends View {
     const footer = this.mode === "issue"
       ? (sel ? `Worktree ${branchFor(sel)}${/Branch: `/.test(sel.body ?? "") ? " (resumes the shelved branch)" : ""} · agent tab opens there with #${sel.number}` : "Pick an issue")
       : "Worktree from your one-liner · agent tab opens there with your brief";
-    return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground).rounded(10)
+    return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground).rounded(10).on_size_change(this.onSize)
       .child(this.header(t, "Start work", [this.button(t, "close", "✕", () => this.dismiss())]))
       .child(h_flex().px(16).border_b(1).border_color(t.border).child(tab("issue", "From an issue")).child(tab("scratch", "From scratch")))
       .when(this.mode === "issue", (el) => el
@@ -472,7 +482,7 @@ export default class Forge extends View {
         .when(sel, (e) => e.child(v_flex().px(16).py(12).gap(8).border_t(1).border_color(t.border).bg(t.canvas)
           .child(h_flex().items_baseline().gap(8)
             .child(MONO(div()).text_size(11).text_color(t.muted).child(`#${sel.number}`))
-            .child(div().font_semibold().flex_1().truncate().child(sel.title))
+            .child(div().font_semibold().flex_1().min_w(0).truncate().child(sel.title))
             .child(this.link(t, "gh", "View on GitHub", sel.url)))
           .child(div().text_size(12.5).text_color(t.muted).max_h(60).overflow_hidden().child((sel.body ?? "").split("\n").filter(Boolean).slice(0, 3).join(" ")))
           .child(div().text_size(12).text_color(t.muted).child("The agent reads the issue and picks how to begin: a bug starts with debug, a feature with brainstorm; a design or plan already on a branch is resumed. Nothing to choose here.")))))
