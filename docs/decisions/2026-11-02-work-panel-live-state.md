@@ -34,3 +34,4 @@ None blocking. Two Herdr feedback items drafted via `herdr-app feedback` (the pe
 ## Deviations
 
 - T1 commit 6dddd78, 8a0f27a — deviation: review fix added (an OPEN PR wins over an older MERGED one on a reused branch; the plan took the first non-closed PR in input order). Review findings on nextLabel for merged tracks and null-path ids dropped: Task 3 `next()` handles merged/PR-only items first, and ids key by PR number — parked: none
+- T2 commit d0020a3 — deviation: none (review: p3s only — transient hc failure blanks msg for one tick, detail view polls all tracks, no hc timeout; accepted as plan-intended) — parked: none
