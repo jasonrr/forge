@@ -412,7 +412,12 @@ export default class Forge extends View {
       this.busy = "Creating worktree…"; cx.notify();
       await this.git(["fetch", "-q", "origin", "main"]);
       const has = async (b) => (await this.git(["show-ref", "--verify", "--quiet", `refs/heads/${b}`])).ok;
-      const onOrigin = async (b) => (await this.git(["ls-remote", "--exit-code", "--heads", "origin", b])).ok;
+      const onOrigin = async (b) => { // exit 2 = no such branch; anything else non-zero (network, auth) must not pass for "absent"
+        const r = await exec("git", [...GIT, "ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${b}`], { cwd: this.root });
+        if (r.code === 2) return false;
+        if (r.code !== 0) throw new Error(`can't check origin for ${b}: ${(r.stderr || "git ls-remote failed").trim()}`);
+        return true;
+      };
       const fromShelf = shelfBranch(issue) !== null;
       if (!fromShelf && await has(branch)) { // never silently reuse a branch that isn't this shelf's: first free -2, -3, …
         const base = branch; let n = 2;
@@ -424,7 +429,7 @@ export default class Forge extends View {
         const f = await this.git(["fetch", "-q", "origin", `${branch}:${branch}`]);
         if (!f.ok) throw new Error(`could not fetch ${branch} from origin`);
         exists = true;
-      }
+      } else if (fromShelf && exists && await onOrigin(branch)) await this.git(["fetch", "-q", "origin", `${branch}:${branch}`]); // fast-forward a stale local shelf branch; a non-ff or checked-out branch is left as is
       const path = `${home()}/.herdr/worktrees/${this.repoName()}/${branch.replace(/\//g, "-")}`; // Herdr's worktree path rule: branch with / as -
       const r = await exec("git", [...GIT, "worktree", "add", ...(exists ? [path, branch] : ["--no-track", "-b", branch, path, this.base])], { cwd: this.root });
       if (r.code !== 0) { this.busy = (r.stderr || "git worktree add failed").trim(); cx.notify(); return; }
