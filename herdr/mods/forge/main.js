@@ -4,7 +4,7 @@
 // from git worktrees, the docs on each branch, gh PRs/issues and the host's agents.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
-import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay } from "herdr";
+import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, hc } from "herdr";
 import { writeFile, mkdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app (AGENTS.md "Other built-ins")
 import { nextLabel, parseWorktrees, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch } from "./model.js";
 
@@ -25,21 +25,21 @@ function location() {
   return { cwd: pane?.cwd || f?.cwd || sibling?.cwd || space?.folder, space: space?.id };
 }
 
-const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, me: null, repoUrl: null });
+const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, ahead: {}, me: null, repoUrl: null });
 
 export default class Forge extends View {
   init(_p, cx) {
     this.root = props()?.root ?? null; this.base = "origin/main";
     this.data = emptyData(); this.seq = 0; this.watchGen = 0; this.watched = "";
     this.w = 0; this.onSize = (size, cx) => { if (Math.abs((this.w ?? 0) - size.width) >= 1) { this.w = size.width; cx.notify(); } }; // container width: the views branch on narrow()
-    this.filter = "all"; this.shown = 50; this.error = null; // each view is its own copy of the mod, so these never collide
+    this.filter = "all"; this.shown = 50; this.error = null; this.msgs = {}; this.polling = false; // each view is its own copy of the mod, so these never collide
     this.search = InputState.new({ placeholder: "Search" });
     this.search.on("change", (_e, cx) => cx.notify());
     if (props()?.view === "start") this.initStart(cx);
     if (props()?.track) this.initDetail(cx);
     this.refresh(cx);
     cx.timer.every(GH_EVERY, (cx) => this.refresh(cx)); // the folder watch covers files, agents() re-renders by itself
-    cx.timer.every(5000, (cx) => this.relocate(cx)); // the sidebar follows the shown space
+    cx.timer.every(5000, (cx) => { this.relocate(cx); cx.spawn((cx) => this.pollMsgs(cx)); }); // the sidebar follows the shown space; agent messages live in herdr-core, not agents()
   }
 
   // --- data ---
@@ -68,7 +68,7 @@ export default class Forge extends View {
       this.base = (await this.git(["rev-parse", "--verify", "-q", "origin/main"])).ok ? "origin/main" : "main";
       const wt = parseWorktrees((await this.git(["worktree", "list", "--porcelain"])).out);
       this.watch([`${root}/docs`, ...wt.filter((w) => !w.main).map((w) => `${w.path}/docs`)], cx);
-      const docs = {}, ages = {};
+      const docs = {}, ages = {}, ahead = {};
       await Promise.all(wt.filter((w) => !w.main).map(async (w) => {
         const changed = await this.git(["diff", "--name-only", `${this.base}...HEAD`, "--", "docs/decisions", "docs/plans"], w.path);
         const untracked = await this.git(["ls-files", "--others", "--exclude-standard", "docs/decisions", "docs/plans"], w.path);
@@ -78,6 +78,7 @@ export default class Forge extends View {
         // (a pruned worktree never gets here: parseWorktrees drops `prunable` blocks)
         docs[w.path] = { design, plan, designText };
         ages[w.path] = Number((await this.git(["log", "-1", "--format=%ct"], w.path)).out) || 0;
+        ahead[w.path] = Number((await this.git(["rev-list", "--count", `${this.base}..HEAD`], w.path)).out) || 0;
       }));
       // ponytail: per-view throttle — docs/ bursts (builds, rebases) reuse the cached lists; one shared cache across views if several open panels ever matter
       const ghFresh = this.ghRoot === root && Date.now() - this.ghAt < GH_EVERY - 1000;
@@ -88,7 +89,7 @@ export default class Forge extends View {
       const me = this.data.me || (await exec("gh", ["api", "user", "-q", ".login"], { cwd: this.root }).catch(() => ({}))).stdout?.trim() || null; // || not ??: an empty string must retry next time
       const repoUrl = this.data.repoUrl || (await exec("gh", ["repo", "view", "--json", "url", "-q", ".url"], { cwd: this.root }).catch(() => ({}))).stdout?.trim() || null;
       if (seq !== this.seq || root !== this.root) return;
-      this.data = { worktrees: wt, docs, prs: prs ?? this.data.prs, issues: issues ?? this.data.issues, ages, me, repoUrl };
+      this.data = { worktrees: wt, docs, prs: prs ?? this.data.prs, issues: issues ?? this.data.issues, ages, ahead, me, repoUrl };
       if (!ghFresh) { this.ghAt = Date.now(); this.ghRoot = root; this.error = prs ? null : "gh unavailable — PRs and issues may be stale"; }
       this.fetched = Date.now();
       if (props()?.track) this.loadDoc(cx); // the detail pane's first load: track() is null until this data exists
@@ -101,10 +102,27 @@ export default class Forge extends View {
     this.watched = key; const gen = ++this.watchGen;
     for (const p of paths) cx.spawn(async (cx) => { while (gen === this.watchGen) { try { await watchFolder(p); if (gen === this.watchGen) this.refresh(cx); } catch { await cx.sleep(5000); } } });
   }
+  // agents() has no status message; herdr-core does (`hc get <t> --json` → .status.msg). Polled every 5s for agents on tracks only, by the views that
+  // show reason text (sidebar, board, detail). One poll in flight per view: a hung remote `hc get` must not stack processes every tick.
+  async pollMsgs(cx) {
+    const v = props()?.view; if (v === "start" || v === "backlog" || this.polling) return;
+    this.polling = true;
+    try {
+      const on = [...new Set(this.live().flatMap((t) => t.agents.map((a) => a.address)))];
+      let changed = false;
+      await Promise.all(on.map(async (addr) => {
+        let msg = null;
+        try { const r = await hc(["get", addr, "--json"]); msg = r.code === 0 ? (JSON.parse(r.stdout || "{}").status?.msg ?? null) : null; } catch { msg = null; }
+        if ((this.msgs[addr] ?? null) !== msg) { this.msgs[addr] = msg; changed = true; }
+      }));
+      for (const k of Object.keys(this.msgs)) if (!on.includes(k)) { delete this.msgs[k]; changed = true; }
+      if (changed) cx.notify();
+    } finally { this.polling = false; }
+  }
   // Live: agents() and panes() change on their own and re-render this view; join them to tracks by cwd.
   live() {
     const ps = panes();
-    const ag = agents().map((a) => ({ address: a.address, status: a.status, cwd: ps.find((p) => p.pane === a.pane)?.cwd ?? null }));
+    const ag = agents().map((a) => ({ address: a.address, status: a.status, cwd: ps.find((p) => p.pane === a.pane)?.cwd ?? null, msg: this.msgs[a.address] ?? null }));
     return tracks({ ...this.data, agents: ag });
   }
   track() { return this.live().find((t) => t.path === props().track) ?? null; }
