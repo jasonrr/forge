@@ -19,3 +19,7 @@
 - `git ls-remote --exit-code --heads origin <name>` matches path suffixes and returns 128 on a network failure → ask for `refs/heads/<name>` and treat only exit 2 as "absent", or a flaky network silently turns a resume into a fresh branch.
 - `gh issue view <n>` happily resolves a PR number → check the URL contains `/issues/` before treating `#n` from prose as an issue.
 - gpui flex children default to their content width, so `flex_1().truncate()` text without `.min_w(0)` pushes siblings off the pane instead of truncating → every shrinkable row needs `min_w(0)`; a plan for a gpui view should say so and include a narrow-pane screenshot check (split the check tab's own pane, close the tab by id).
+
+## work-panel-live-state (PR #17, 2026-11-02)
+
+- Repointing the mod symlink at a worktree mid-session → fresh tabs load the new code but the already-docked copy keeps the old build (it does not hot-reload across a symlink target change), and `herdr-app shot` returns the last painted frame, which stops changing when the window is not repainting → a plan that verifies the docked panel should have the human reopen it (or restart the app) after the install step, not try to remount it with `layout.hide`/`layout.show` from the CLI.
