@@ -15,3 +15,6 @@
 - A plan that reuses an instance field across tasks (`this.base` = git base ref in Task 3, the editor's merge base in Task 5) → a later task silently clobbers state an earlier task's render reads; grep the plan for every `this.<field>` assignment before handing out tasks.
 - `gh pr view` on a branch falls back to a CLOSED or MERGED PR when no open one exists → any "no PR yet → create" check built on it silently never fires for a reused branch; use `gh pr list --head <br> --state open`.
 - `git worktree remove` without `--force` refuses untracked files but silently deletes ignored ones (`.env`, local config) → a cleanup skill must list `git status --porcelain --ignored` and stop on non-regenerable files before removing.
+- A UI that offers per-stage verbs next to a skill that routes by reading → two routers that disagree (the panel said "Resume build" where the skill said review); when a design names one entry verb, every button should call it and only labels may vary.
+- `git ls-remote --exit-code --heads origin <name>` matches path suffixes and returns 128 on a network failure → ask for `refs/heads/<name>` and treat only exit 2 as "absent", or a flaky network silently turns a resume into a fresh branch.
+- `gh issue view <n>` happily resolves a PR number → check the URL contains `/issues/` before treating `#n` from prose as an issue.
