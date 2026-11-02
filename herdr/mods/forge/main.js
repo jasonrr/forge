@@ -22,6 +22,7 @@ const alpha = (c, aa) => (/^#[0-9a-f]{6}$/i.test(c) ? c + aa : c);
 // The sidebar has no cwd of its own: the space, the focused pane, or a terminal pane in the same tab.
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
+  if (!space) return {}; // its machine's layout is loading: no cwd, so nothing runs locally on a remote path
   const all = panes(), pane = f?.pane ? all.find((p) => p.pane === f.pane) : null;
   const sibling = f?.tab ? all.find((p) => p.tab === f.tab && p.cwd) : null;
   return { cwd: pane?.cwd || f?.cwd || sibling?.cwd || space?.folder, space: space?.id, machine: space?.machine ?? null };
@@ -70,7 +71,7 @@ export default class Forge extends View {
           if (machine !== this.on) { this.on = machine; this.root = null; this.resetData(); }
           const common = await this.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd, machine);
           if (seq !== this.seq) return;
-          if (common.failed) { this.error = `can't reach ${machine ?? "git"} — showing the last data`; cx.notify(); return; } // unreachable ≠ not a repo: keep what we have
+          if (common.failed && machine) { this.error = `can't reach ${machine} — showing the last data`; cx.notify(); return; } // unreachable ≠ not a repo: keep what we have
           if (!common.ok) { this.root = null; this.resetData(); this.watch([], cx, machine); this.error = "no git repo in this space"; cx.notify(); return; }
           const r0 = common.out.replace(/\/\.git$/, "");
           if (r0 !== this.root) { this.root = r0; this.resetData(); } // another repo's PRs, issues and url must never show
