@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS } from "./model.js";
+import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, grouped, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS } from "./model.js";
 
 const WT = "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\nworktree /r/.claude/worktrees/ring\nHEAD bbb\nbranch refs/heads/feat/ring\n\nworktree /h/.herdr/worktrees/r/fix-login\nHEAD ccc\ndetached\n\nworktree /gone\nHEAD ddd\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n";
 
@@ -211,4 +211,12 @@ test("chip: a blocked or working agent wins, then merged, then the first agent, 
   assert.equal(chip(t({ ...merged, agents: a("idle") })), "merged");
   assert.equal(chip(t({ agents: a("done") })), "done");
   assert.equal(chip(t({})), "no agent");
+});
+
+test("agentsOn: only that machine's agents; an unknown space is nobody's", () => {
+  const sp = [{ id: "s1", machine: null }, { id: "mbp/s2", machine: "mbp" }];
+  const ag = [{ address: "t1", space: "s1" }, { address: "mbp/t2", space: "mbp/s2" }, { address: "mbp/t3", space: "mbp/s9" }];
+  assert.deepEqual(agentsOn(ag, sp, null).map((a) => a.address), ["t1"]);
+  assert.deepEqual(agentsOn(ag, sp, "mbp").map((a) => a.address), ["mbp/t2"]);
+  assert.deepEqual(agentsOn(ag, sp, undefined).map((a) => a.address), ["t1"]);
 });

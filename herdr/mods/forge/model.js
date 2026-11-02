@@ -120,6 +120,13 @@ export function tracks(input) {
   return ts;
 }
 
+// One machine's agents (on: a space's `machine`, null = this computer). A space missing from spaces() — its machine's layout
+// still loading or unavailable — is nobody's: never count it as local, or a same-path remote agent lands on a local track.
+export function agentsOn(agents, spaces, on) {
+  const m = new Map(spaces.map((s) => [s.id, s.machine ?? null]));
+  return agents.filter((a) => m.has(a.space) && m.get(a.space) === (on ?? null));
+}
+
 export function grouped(ts) {
   return GROUPS.map(([key, title]) => {
     const items = ts.filter((t) => t.group === key).sort((a, b) => (key === "hold" ? a.at - b.at : b.at - a.at));
