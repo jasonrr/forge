@@ -62,8 +62,9 @@ function group(t) {
 }
 
 // The card's one line: what the agent says it is doing; without one, the facts on disk.
+const lead = (t) => t.agents.find((x) => x.status === "blocked") ?? t.agents.find((x) => x.status === "working") ?? t.agents[0] ?? null;
 function reason(t) {
-  const a = t.agents.find((x) => x.status === "blocked") ?? t.agents.find((x) => x.status === "working") ?? t.agents[0] ?? null;
+  const a = lead(t);
   if (a?.status === "blocked") return a.msg ? `blocked · ${a.msg}` : "agent asked you something";
   if (t.group === "needs") return `review PR #${t.pr.number}`;
   if (t.group === "flight") return a?.msg ? `working · ${a.msg}` : "working";
@@ -72,6 +73,8 @@ function reason(t) {
   const who = a ? `${a.status}${a.msg ? ` · ${a.msg}` : ""}` : "no agent"; // an idle or done agent is still on the track: say so, with its last message
   return `${who} · ${t.ahead} commit${t.ahead === 1 ? "" : "s"} ahead · ${pr}`;
 }
+
+export function chip(t) { const a = lead(t); return a && (a.status === "blocked" || a.status === "working") ? a.status : t.merged ? "merged" : a?.status ?? "no agent"; } // the card's status chip: the agent that decides the group, else merged
 
 // The action button's label: the forge verb the branch is at. The PR decides first (docs vanish from `diff base...HEAD` after a rebase onto
 // merged docs, and fix/ branches never have any); then which docs exist. /forge:start routes by itself; this is for the human.

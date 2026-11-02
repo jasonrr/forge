@@ -6,7 +6,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
 import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, hc } from "herdr";
 import { writeFile, mkdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app (AGENTS.md "Other built-ins")
-import { nextLabel, parseWorktrees, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch } from "./model.js";
+import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch } from "./model.js";
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const GH_EVERY = 30000; // gh is called at most this often per view (GraphQL budget: 5000 pts/h per user; one refresh ≈ 1 pt per 100 PRs or issues)
@@ -222,7 +222,7 @@ export default class Forge extends View {
         .on_click(() => (s.path ? this.openDetail(s) : this.openGitHub(s.pr.url)))
         .child(h_flex().items_center().gap(8)
           .child(div().font_semibold().flex_1().min_w(0).truncate().child(s.slug))
-          .child(div().px(6).py(1).rounded(9).text_size(10.5).flex_none().bg(alpha(color, "22")).text_color(color).child(s.merged ? "merged" : s.agents[0]?.status ?? "no agent"))
+          .child(div().px(6).py(1).rounded(9).text_size(10.5).flex_none().bg(alpha(color, "22")).text_color(color).child(chip(s)))
           .child(MONO(div()).text_size(11).text_color(t.muted).truncate().min_w(0).flex_shrink(1).child(s.branch)))
         .child(h_flex().gap(6).items_center().flex_wrap()
           .when(s.path, (e) => e.child(art("design", s.design)).child(art("plan", s.plan)))
@@ -404,7 +404,7 @@ export default class Forge extends View {
         .when(tr.pr, (e) => e.child(this.link(t, "hpr", `PR #${tr.pr.number}`, tr.pr.url)))
         .children(tr.issues.slice(0, 3).map((n) => this.link(t, `hi-${n}`, `#${n}`, `${gh}/issues/${n}`)))
         .child(h_flex().flex_grow(1).justify_end().items_center().gap(8)
-          .child(div().px(6).py(1).rounded(9).text_size(10.5).bg(alpha(color, "22")).text_color(color).child(tr.merged ? "merged" : tr.agents[0]?.status ?? "no agent"))
+          .child(div().px(6).py(1).rounded(9).text_size(10.5).bg(alpha(color, "22")).text_color(color).child(chip(tr)))
           .when(!tr.merged, (e) => e.child(this.button(t, "shelve", "Shelve → issue", () => this.shelve(tr))))))
       .when(slim, (el) => el.child(h_flex().px(12).py(6).gap(8).items_center().border_b(1).border_color(t.border).text_size(12)
         .child(div().text_size(10.5).font_semibold().text_color(t.muted).flex_none().child("WAITING ON"))

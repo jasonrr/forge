@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch, nextLabel, DONE_WINDOW_MS } from "./model.js";
+import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS } from "./model.js";
 
 const WT = "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\nworktree /r/.claude/worktrees/ring\nHEAD bbb\nbranch refs/heads/feat/ring\n\nworktree /h/.herdr/worktrees/r/fix-login\nHEAD ccc\ndetached\n\nworktree /gone\nHEAD ddd\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n";
 
@@ -190,4 +190,16 @@ test("a worktree whose PR merged is done and dated by the merge, and shows the m
 test("a reused branch: an open PR wins over an old merged one listed first", () => {
   const t = tracks(input({ prs: [{ ...input().prs[0], number: 40, state: "MERGED", mergedAt: "2026-10-01T00:00:00Z" }, input().prs[0]] })).find((x) => x.branch === "feat/ring");
   assert.equal(t.pr.number, 55); assert.equal(t.merged, false);
+});
+
+test("chip: a blocked or working agent wins, then merged, then the first agent, then no agent", () => {
+  const t = (over) => tracks(input(over)).find((x) => x.branch === "feat/ring");
+  const a = (...st) => st.map((status, i) => ({ address: `t${i}`, status, cwd: "/r/.claude/worktrees/ring" }));
+  const merged = { prs: [{ ...input().prs[0], state: "MERGED", mergedAt: "2026-11-01T00:00:00Z" }] };
+  assert.equal(chip(t({ agents: a("idle", "blocked") })), "blocked");
+  assert.equal(chip(t({ agents: a("idle", "working") })), "working");
+  assert.equal(chip(t({ ...merged, agents: a("working") })), "working");
+  assert.equal(chip(t({ ...merged, agents: a("idle") })), "merged");
+  assert.equal(chip(t({ agents: a("done") })), "done");
+  assert.equal(chip(t({})), "no agent");
 });
