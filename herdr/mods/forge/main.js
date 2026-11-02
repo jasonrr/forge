@@ -24,10 +24,12 @@ function location() {
   return { cwd: pane?.cwd || f?.cwd || sibling?.cwd || space?.folder, space: space?.id };
 }
 
+const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, me: null, repoUrl: null });
+
 export default class Forge extends View {
   init(_p, cx) {
     this.root = props()?.root ?? null; this.base = "origin/main";
-    this.data = { worktrees: [], docs: {}, prs: [], issues: [], ages: {}, me: null, repoUrl: null };
+    this.data = emptyData(); this.seq = 0; this.watchGen = 0; this.watched = "";
     this.filter = "all"; this.shown = 50; this.error = null; // each view is its own copy of the mod, so these never collide
     this.search = InputState.new({ placeholder: "Search" });
     this.search.on("change", (_e, cx) => cx.notify());
@@ -52,15 +54,18 @@ export default class Forge extends View {
   }
   refresh(cx) {
     cx.spawn(async (cx) => {
+      const seq = ++this.seq; // a newer refresh (or a repo change) supersedes this one: it must not write its data
       if (!props()?.root) { // the sidebar follows the shown space; other views are pinned to props().root
         const { cwd } = location(); if (!cwd) return; this.cwd = cwd;
         const common = await this.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd);
-        if (!common.ok) { this.root = null; this.error = "no git repo in this space"; cx.notify(); return; }
-        const root = common.out.replace(/\/\.git$/, "");
-        if (root !== this.root) { this.root = root; this.watch(root, cx); }
+        if (!common.ok) { this.root = null; this.data = emptyData(); this.watch([], cx); this.error = "no git repo in this space"; cx.notify(); return; }
+        const r0 = common.out.replace(/\/\.git$/, "");
+        if (r0 !== this.root) { this.root = r0; this.data = emptyData(); } // another repo's PRs, issues and url must never show
       }
+      const root = this.root;
       this.base = (await this.git(["rev-parse", "--verify", "-q", "origin/main"])).ok ? "origin/main" : "main";
       const wt = parseWorktrees((await this.git(["worktree", "list", "--porcelain"])).out);
+      this.watch([`${root}/docs`, ...wt.filter((w) => !w.main).map((w) => `${w.path}/docs`)], cx);
       const docs = {}, ages = {};
       await Promise.all(wt.filter((w) => !w.main).map(async (w) => {
         const changed = await this.git(["diff", "--name-only", `${this.base}...HEAD`, "--", "docs/decisions", "docs/plans"], w.path);
@@ -78,6 +83,7 @@ export default class Forge extends View {
       ]);
       const me = this.data.me || (await exec("gh", ["api", "user", "-q", ".login"], { cwd: this.root }).catch(() => ({}))).stdout?.trim() || null; // || not ??: an empty string must retry next time
       const repoUrl = this.data.repoUrl || (await exec("gh", ["repo", "view", "--json", "url", "-q", ".url"], { cwd: this.root }).catch(() => ({}))).stdout?.trim() || null;
+      if (seq !== this.seq || root !== this.root) return;
       this.data = { worktrees: wt, docs, prs: prs ?? this.data.prs, issues: issues ?? this.data.issues, ages, me, repoUrl };
       this.error = prs ? null : "gh unavailable — PRs and issues may be stale";
       this.fetched = Date.now();
@@ -85,8 +91,11 @@ export default class Forge extends View {
       cx.notify();
     });
   }
-  watch(root, cx) {
-    cx.spawn(async (cx) => { try { while (this.root === root) { await watchFolder(`${root}/docs`); if (this.root === root) this.refresh(cx); } } catch {} });
+  // One loop per docs/ dir (main root + each linked worktree); the set restarts only when the path list changes. A missing dir rejects: wait and retry while the set is current.
+  watch(paths, cx) {
+    const key = paths.join("\n"); if (key === this.watched) return;
+    this.watched = key; const gen = ++this.watchGen;
+    for (const p of paths) cx.spawn(async (cx) => { while (gen === this.watchGen) { try { await watchFolder(p); if (gen === this.watchGen) this.refresh(cx); } catch { await cx.sleep(5000); } } });
   }
   // Live: agents() and panes() change on their own and re-render this view; join them to tracks by cwd.
   live() {
@@ -116,11 +125,12 @@ export default class Forge extends View {
     if (t.agents.some((a) => a.status === "working")) return { label: "Open tab", go: () => run("agent.focus", { terminal: t.agents.find((a) => a.status === "working").address }) };
     if (t.stage === 5) { // Herdr's own Remove worktree dialog closes the space it is given — only when this track has one (mods/worktree/main.js:2 documents {space, folder?, action}); otherwise an agent removes it
       const sp = spaces().find((s) => s.folder === t.path);
-      return { label: "Remove worktree", go: () => sp ? openOverlay({ mod: "worktree", props: { action: "remove", space: sp.id, folder: t.path }, kind: "dialog" })
-        : this.openAgent(this.root, `This branch is merged. Run: git worktree remove "${t.path}" (never --force; if it refuses, say why and stop), then git branch -d ${t.branch} (never -D). Then stop.`) };
+      // that dialog can --force, so offer it only for a clean worktree; a dirty one goes to the agent, which never forces
+      return { label: "Remove worktree", go: async () => { const st = sp ? await this.git(["status", "--porcelain"], t.path) : null; return st?.ok && !st.out ? openOverlay({ mod: "worktree", props: { action: "remove", space: sp.id, folder: t.path }, kind: "dialog" })
+        : this.openAgent(this.root, `This branch is merged. Run: git worktree remove "${t.path}" (never --force; if it refuses, say why and stop), then git branch -d ${t.branch} (never -D). Then stop.`); } };
     }
     if (t.stage === 4) return { label: "Review", go: () => this.openAgent(t.path, "/forge:review-branch") };
-    if (t.stage >= 2) return { label: t.stage === 3 ? "Resume build" : "Build", go: () => this.openAgent(t.path, `/forge:build ${t.plan}`) };
+    if (t.stage >= 2) return { label: t.stage === 3 ? "Resume build" : "Build", go: () => this.openAgent(t.path, t.plan ? `/forge:build ${t.plan}` : "/forge:build") };
     if (t.stage === 1) return { label: "Plan", go: () => this.openAgent(t.path, "/forge:plan") };
     return { label: "Start", go: () => this.openAgent(t.path, "/forge:start") };
   }
@@ -271,7 +281,7 @@ export default class Forge extends View {
   }
   initDetail(cx) {
     this.tab = "design"; this.docs = {}; this.editing = false; this.editor = null; this.saveMsg = null; this.log = [];
-    cx.spawn(async (cx) => { for (;;) { try { await watchFolder(`${props().track}/docs`); } catch { return; } if (!this.editing) { this.docs = {}; this.loadDoc(cx); } } }); // ends when the worktree goes; while editing, save() reconciles instead
+    cx.spawn(async (cx) => { for (;;) { try { await watchFolder(`${props().track}/docs`); } catch { if (this.data.worktrees.length && !this.track()) return; await cx.sleep(5000); continue; } if (!this.editing) { this.docs = {}; this.loadDoc(cx); } } }); // ends only when the worktree is gone (a missing docs/ retries every 5 s); while editing, save() reconciles instead
     this.loadDoc(cx);
   }
   // Reads the shown tab's file once per change; `expected` is the text on disk when it was read.
@@ -280,15 +290,15 @@ export default class Forge extends View {
       const tr = this.track(); if (!tr) return;
       for (const key of ["design", "plan"]) {
         const rel = tr[key]; if (!rel || this.docs[key]) continue;
-        const text = (await readTextFile(`${tr.path}/${rel}`).catch((e) => `_${e}_`)) ?? "";
-        this.docs[key] = { rel, text };
+        try { this.docs[key] = { rel, text: (await readTextFile(`${tr.path}/${rel}`)) ?? "" }; } catch (e) { this.docs[key] = { rel, text: null, err: String(e) }; } // text null = unreadable: shown, never editable
       }
       this.log = (await this.git(["log", "-6", "--format=%h%x09%s%x09%cr"], tr.path)).out.split("\n").filter(Boolean).map((l) => l.split("\t"));
       cx.notify();
     });
   }
   edit(cx) {
-    const d = this.docs[this.tab]; if (!d) return;
+    const d = this.docs[this.tab]; if (!d || d.text === null) return;
+    this.saveMsg = null;
     this.editBase = d.text; // NOT this.base (that is the git base ref the header and refresh use) — what the person started from: the `expected` for the save and the merge base — never the reloaded text
     this.editor = EditorState.new({ language: "markdown", value: d.text, soft_wrap: true, line_numbers: false, folding: false });
     this.editing = true; cx.notify();
@@ -296,23 +306,27 @@ export default class Forge extends View {
   // Stale save: 3-way merge with git merge-file (base = what we read, ours = the edit, theirs = disk).
   // Markers left → write them and open an agent tab in the worktree to resolve. Never a refusal.
   async save(cx) {
+    if (this.saving) return;
     const tr = this.track(), d = this.docs[this.tab]; if (!tr || !d) return;
-    const path = `${tr.path}/${d.rel}`, ours = this.editor.value();
-    try { await writeTextFile(path, ours, this.editBase); this.saveMsg = "saved"; }
-    catch {
-      const theirs = (await readTextFile(path)) ?? "";
-      const dir = `${appHome()}/data/forge-merge`, tmp = `${dir}/${Date.now()}`; // per save, so two panes never share files
-      await mkdir(dir, { recursive: true });
-      await Promise.all([writeFile(`${tmp}.base`, this.editBase), writeFile(`${tmp}.ours`, ours), writeFile(`${tmp}.theirs`, theirs)]);
-      const r = await exec("git", ["merge-file", "-p", "-L", "yours", "-L", "before", "-L", "agent", `${tmp}.ours`, `${tmp}.base`, `${tmp}.theirs`]);
-      exec("rm", ["-f", `${tmp}.base`, `${tmp}.ours`, `${tmp}.theirs`]);
-      // merge-file exits with the conflict count (0..127); anything else is an error with empty stdout — never write that over the file.
-      if (r.code < 0 || r.code > 127) { this.saveMsg = `merge failed: ${(r.stderr || "git merge-file error").trim()} — your text is still in the editor`; cx.notify(); return; }
-      await writeTextFile(path, r.stdout, theirs);
-      if (r.code === 0) this.saveMsg = "merged with an agent's edit and saved";
-      else { this.saveMsg = "conflict — an agent tab is resolving it"; this.openAgent(tr.path, `Resolve the conflict markers in ${d.rel} (yours = the person's edit, agent = your earlier write); keep both intents, then stop.`); }
-    }
-    this.docs = {}; this.editing = false; this.editor = null; this.editBase = null; this.loadDoc(cx); cx.notify();
+    this.saving = true; let tmp = null;
+    try {
+      const path = `${tr.path}/${d.rel}`, ours = this.editor.value();
+      try { await writeTextFile(path, ours, this.editBase); this.saveMsg = "saved"; }
+      catch {
+        const raw = await readTextFile(path), theirs = raw ?? ""; // raw is null when the file is gone: expecting null recreates it
+        const dir = `${appHome()}/data/forge-merge`; tmp = `${dir}/${Date.now()}`; // per save, so two panes never share files
+        await mkdir(dir, { recursive: true });
+        await Promise.all([writeFile(`${tmp}.base`, this.editBase), writeFile(`${tmp}.ours`, ours), writeFile(`${tmp}.theirs`, theirs)]);
+        const r = await exec("git", ["merge-file", "-p", "-L", "yours", "-L", "before", "-L", "agent", `${tmp}.ours`, `${tmp}.base`, `${tmp}.theirs`]);
+        // merge-file exits with the conflict count (0..127); anything else (a null code from a kill, 255) is an error with empty stdout — never write that over the file.
+        if (!(r.code >= 0 && r.code <= 127)) { this.saveMsg = `merge failed: ${(r.stderr || "git merge-file error").trim()} — your text is still in the editor`; cx.notify(); return; }
+        await writeTextFile(path, r.stdout, raw);
+        if (r.code === 0) this.saveMsg = "merged with an agent's edit and saved";
+        else { this.saveMsg = "conflict — an agent tab is resolving it"; this.openAgent(tr.path, `Resolve the conflict markers in ${d.rel} (yours = the person's edit, agent = your earlier write); keep both intents, then stop.`); }
+      }
+      this.docs = {}; this.editing = false; this.editor = null; this.editBase = null; this.loadDoc(cx); cx.notify();
+    } catch (e) { this.saveMsg = `save failed: ${e?.message ?? e} — your text is still in the editor`; cx.notify(); }
+    finally { this.saving = false; if (tmp) exec("rm", ["-f", `${tmp}.base`, `${tmp}.ours`, `${tmp}.theirs`]).catch(() => {}); }
   }
   renderDetail(cx) {
     const t = theme(), tr = this.track();
@@ -325,6 +339,7 @@ export default class Forge extends View {
       const d = this.docs[key];
       if (!tr[key]) return v_flex().p(12).gap(8).child(div().text_color(t.dim).child(`no ${key} on this branch yet`)).child(this.button(t, `mk-${key}`, key === "design" ? "Brainstorm" : "Plan", () => this.openAgent(tr.path, key === "design" ? "/forge:brainstorm" : "/forge:plan"), true));
       if (!d) return this.empty(t, "loading…");
+      if (d.text === null) return this.empty(t, `can't read ${d.rel}: ${d.err}`);
       if (this.editing) return Editor.new(this.editor).flex_1().min_h(0);
       const body = v_flex().flex_1().min_h(0).child(TextView.markdown(`doc-${key}`, d.text).selectable().scrollable());
       if (key !== "plan") return body;
@@ -359,7 +374,7 @@ export default class Forge extends View {
           .child(div().w(7).h(7).rounded(4).bg(t[a.status] ?? t.idle)).child(MONO(div()).child(a.address)).child(div().text_color(t.muted).child(a.status))) : [div().text_color(t.dim).child("none")]))
       .child(v_flex().gap(4).child(div().text_size(10.5).font_semibold().text_color(t.muted).child("ACTIVITY"))
         .children(this.log.length ? this.log.map(([h, s, when]) => v_flex().child(div().truncate().child(s)).child(MONO(div()).text_size(10.5).text_color(t.dim).child(`${h} · ${when}`))) : [div().text_color(t.dim).child("no commits yet")]));
-    const canEdit = (this.tab === "design" || this.tab === "plan") && this.docs[this.tab];
+    const canEdit = (this.tab === "design" || this.tab === "plan") && this.docs[this.tab]?.text != null;
     return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground)
       .child(h_flex().px(12).py(8).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().text_size(14).child(tr.slug))
@@ -375,7 +390,7 @@ export default class Forge extends View {
           .child(h_flex().px(8).items_center().border_b(1).border_color(t.border).children(tabs.map(([k, l]) => tabEl(k, l))).child(h_flex().flex_1())
             .when(this.saveMsg, (e) => e.child(div().px(8).text_size(11).text_color(t.muted).child(this.saveMsg)))
             .when(canEdit && !this.editing, (e) => e.child(this.button(t, "edit", "Edit", (cx) => this.edit(cx))))
-            .when(this.editing, (e) => e.child(this.button(t, "cancel", "Cancel", (cx) => { this.editing = false; this.editor = null; cx.notify(); })).child(this.button(t, "save", "Save", (cx) => cx.spawn((cx) => this.save(cx)), true))))
+            .when(this.editing, (e) => e.child(this.button(t, "cancel", "Cancel", (cx) => { this.editing = false; this.editor = null; this.saveMsg = null; this.docs = {}; this.loadDoc(cx); cx.notify(); })).child(this.button(t, "save", "Save", (cx) => cx.spawn((cx) => this.save(cx)), true))))
           .child(this.tab === "design" ? doc("design") : this.tab === "plan" ? doc("plan") : this.tab === "pr" ? prTab() : issuesTab()))
         .child(rail));
   }
@@ -391,18 +406,21 @@ export default class Forge extends View {
     const issue = this.mode === "issue" ? this.data.issues.find((i) => i.number === this.sel) : null;
     const title = this.mode === "issue" ? issue?.title : this.title.value().trim();
     if (!title) { this.busy = "Pick an issue or type a title."; cx.notify(); return; }
-    const branch = branchFor(issue, title), path = `${home()}/.herdr/worktrees/${this.repoName()}/${branch.replace(/\//g, "-")}`; // Herdr's worktree path rule: branch with / as -
-    this.busy = "Creating worktree…"; cx.notify();
-    await this.git(["fetch", "-q", "origin", "main"]);
-    const exists = (await this.git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).ok;
-    const r = await exec("git", [...GIT, "worktree", "add", ...(exists ? [path, branch] : ["--no-track", "-b", branch, path, this.base])], { cwd: this.root });
-    if (r.code !== 0) { this.busy = (r.stderr || "git worktree add failed").trim(); cx.notify(); return; }
-    const extra = this.mode === "issue" ? "" : this.brief.value().trim();
-    const task = issue ? `/forge:start #${issue.number}` : `/forge:start ${title}${extra ? `\n\n${extra}` : ""}${this.alsoIssue ? "\n\nAlso open a GitHub issue for this so it shows in the backlog if it stalls." : ""}`;
-    await this.openAgent(path, task);
-    this.dismiss();
+    if (!this.root) { this.busy = "No git repo here."; cx.notify(); return; }
+    try {
+      const branch = branchFor(issue, title), path = `${home()}/.herdr/worktrees/${this.repoName()}/${branch.replace(/\//g, "-")}`; // Herdr's worktree path rule: branch with / as -
+      this.busy = "Creating worktree…"; cx.notify();
+      await this.git(["fetch", "-q", "origin", "main"]);
+      const exists = (await this.git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).ok;
+      const r = await exec("git", [...GIT, "worktree", "add", ...(exists ? [path, branch] : ["--no-track", "-b", branch, path, this.base])], { cwd: this.root });
+      if (r.code !== 0) { this.busy = (r.stderr || "git worktree add failed").trim(); cx.notify(); return; }
+      const extra = this.mode === "issue" ? "" : this.brief.value().trim();
+      const task = issue ? `/forge:start #${issue.number}` : `/forge:start ${title}${extra ? `\n\n${extra}` : ""}${this.alsoIssue ? "\n\nAlso open a GitHub issue for this so it shows in the backlog if it stalls." : ""}`;
+      await this.openAgent(path, task);
+      this.dismiss();
+    } catch (e) { this.busy = String(e?.message ?? e); cx.notify(); }
   }
-  dismiss() { if (props().overlay) closeOverlay(props().overlay); else run("tab.close", { confirmed: true }); } // the dialog also works as a tab (scriptable check); NOT named close(): close(cx) is Herdr's lifecycle hook, called when this tab or pane goes
+  dismiss() { if (props().overlay) closeOverlay(props().overlay); } // only the overlay closes; the tab-mounted view (scriptable check) never runs tab.close. NOT named close(): close(cx) is Herdr's lifecycle hook, called when this tab or pane goes
   renderStart(cx) {
     const t = theme(), taken = takenIssues(this.live()), q = this.search.value().trim().toLowerCase();
     const issues = this.data.issues.filter((i) => !q || `#${i.number} ${i.title}`.toLowerCase().includes(q));
