@@ -2,3 +2,6 @@
 node_modules/
 .claude/worktrees/
 .claude/dispatch-log.md
+herdr/mods/forge/jsconfig.json
+herdr/mods/forge/gpui-kit.d.ts
+herdr/mods/forge/herdr.d.ts

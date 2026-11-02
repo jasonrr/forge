@@ -25,6 +25,7 @@ esac
 
 bash hooks/session-start.test.sh
 node --experimental-strip-types --no-warnings --input-type=module -e 'await import(new URL("pi/extensions/routing.ts", "file://" + process.cwd() + "/"))'
+if command -v herdr-app >/dev/null; then herdr-app check herdr/mods/forge; else echo "publish: no herdr-app here; skipping the mod check"; fi
 
 # perl, not sed -i: same syntax on macOS and Linux; keeps the files' formatting.
 perl -pi -e "s/\"version\": \"\Q$cur\E\"/\"version\": \"$new\"/" .claude-plugin/plugin.json .codex-plugin/plugin.json package.json
