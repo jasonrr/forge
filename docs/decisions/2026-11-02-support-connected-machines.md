@@ -33,3 +33,7 @@ Thread the shown space's machine through the panel. Herdr already supports this:
 ## Open questions
 
 - None. (The agent-address question was settled while planning: remote space, tab and pane ids carry a `machine/` prefix, and `AgentInfo.space` names the space.)
+
+## Deviations
+
+- T1 commit 10f9cdb — deviation: none — parked: none
