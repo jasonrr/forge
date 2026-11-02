@@ -4,12 +4,14 @@
 // from git worktrees, the docs on each branch, gh PRs/issues and the host's agents.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
-import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay } from "herdr";
+import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, hc, layout, setShared, shared } from "herdr";
 import { writeFile, mkdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app (AGENTS.md "Other built-ins")
-import { STAGES, parseWorktrees, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch } from "./model.js";
+import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch, DONE_WINDOW_MS } from "./model.js";
+const DONE_SUFFIX = ` · ${DONE_WINDOW_MS / 86400000} DAYS`;
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const GH_EVERY = 30000; // gh is called at most this often per view (GraphQL budget: 5000 pts/h per user; one refresh ≈ 1 pt per 100 PRs or issues)
+const RAIL = 44; // the folded width; the sidebar mod uses 44 too (76 on macOS only because of the traffic lights, which this panel never sits under)
 const MONO = (el) => el.font_family(settings().font_family); // the terminal's mono font (AGENTS.md: settings().font_family)
 const ago = (sec) => { const d = Math.max(0, Date.now() / 1000 - sec); return d < 3600 ? `${Math.floor(d / 60)}m` : d < 86400 ? `${Math.floor(d / 3600)}h` : `${Math.floor(d / 86400)}d`; };
 const since = (iso) => ago(Date.parse(iso) / 1000);
@@ -25,21 +27,21 @@ function location() {
   return { cwd: pane?.cwd || f?.cwd || sibling?.cwd || space?.folder, space: space?.id };
 }
 
-const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, me: null, repoUrl: null });
+const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, ahead: {}, me: null, repoUrl: null });
 
 export default class Forge extends View {
   init(_p, cx) {
     this.root = props()?.root ?? null; this.base = "origin/main";
     this.data = emptyData(); this.seq = 0; this.watchGen = 0; this.watched = "";
     this.w = 0; this.onSize = (size, cx) => { if (Math.abs((this.w ?? 0) - size.width) >= 1) { this.w = size.width; cx.notify(); } }; // container width: the views branch on narrow()
-    this.filter = "all"; this.shown = 50; this.error = null; // each view is its own copy of the mod, so these never collide
+    this.filter = "all"; this.shown = 50; this.error = null; this.msgs = {}; this.polling = false; // each view is its own copy of the mod, so these never collide
     this.search = InputState.new({ placeholder: "Search" });
     this.search.on("change", (_e, cx) => cx.notify());
     if (props()?.view === "start") this.initStart(cx);
     if (props()?.track) this.initDetail(cx);
     this.refresh(cx);
     cx.timer.every(GH_EVERY, (cx) => this.refresh(cx)); // the folder watch covers files, agents() re-renders by itself
-    cx.timer.every(5000, (cx) => this.relocate(cx)); // the sidebar follows the shown space
+    cx.timer.every(5000, (cx) => { this.relocate(cx); cx.spawn((cx) => this.pollMsgs(cx)); }); // the sidebar follows the shown space; agent messages live in herdr-core, not agents()
   }
 
   // --- data ---
@@ -68,7 +70,7 @@ export default class Forge extends View {
       this.base = (await this.git(["rev-parse", "--verify", "-q", "origin/main"])).ok ? "origin/main" : "main";
       const wt = parseWorktrees((await this.git(["worktree", "list", "--porcelain"])).out);
       this.watch([`${root}/docs`, ...wt.filter((w) => !w.main).map((w) => `${w.path}/docs`)], cx);
-      const docs = {}, ages = {};
+      const docs = {}, ages = {}, ahead = {};
       await Promise.all(wt.filter((w) => !w.main).map(async (w) => {
         const changed = await this.git(["diff", "--name-only", `${this.base}...HEAD`, "--", "docs/decisions", "docs/plans"], w.path);
         const untracked = await this.git(["ls-files", "--others", "--exclude-standard", "docs/decisions", "docs/plans"], w.path);
@@ -78,17 +80,18 @@ export default class Forge extends View {
         // (a pruned worktree never gets here: parseWorktrees drops `prunable` blocks)
         docs[w.path] = { design, plan, designText };
         ages[w.path] = Number((await this.git(["log", "-1", "--format=%ct"], w.path)).out) || 0;
+        ahead[w.path] = Number((await this.git(["rev-list", "--count", `${this.base}..HEAD`], w.path)).out) || 0;
       }));
       // ponytail: per-view throttle — docs/ bursts (builds, rebases) reuse the cached lists; one shared cache across views if several open panels ever matter
       const ghFresh = this.ghRoot === root && Date.now() - this.ghAt < GH_EVERY - 1000;
       const [prs, issues] = ghFresh ? [this.data.prs, this.data.issues] : await Promise.all([
-        this.gh(["pr", "list", "--state", "all", "--limit", "200", "--json", "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt"]),
+        this.gh(["pr", "list", "--state", "all", "--limit", "200", "--json", "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author"]),
         this.gh(["issue", "list", "--state", "open", "--limit", "500", "--json", "number,title,body,url,labels,author,createdAt"]),
       ]);
       const me = this.data.me || (await exec("gh", ["api", "user", "-q", ".login"], { cwd: this.root }).catch(() => ({}))).stdout?.trim() || null; // || not ??: an empty string must retry next time
       const repoUrl = this.data.repoUrl || (await exec("gh", ["repo", "view", "--json", "url", "-q", ".url"], { cwd: this.root }).catch(() => ({}))).stdout?.trim() || null;
       if (seq !== this.seq || root !== this.root) return;
-      this.data = { worktrees: wt, docs, prs: prs ?? this.data.prs, issues: issues ?? this.data.issues, ages, me, repoUrl };
+      this.data = { worktrees: wt, docs, prs: prs ?? this.data.prs, issues: issues ?? this.data.issues, ages, ahead, me, repoUrl };
       if (!ghFresh) { this.ghAt = Date.now(); this.ghRoot = root; this.error = prs ? null : "gh unavailable — PRs and issues may be stale"; }
       this.fetched = Date.now();
       if (props()?.track) this.loadDoc(cx); // the detail pane's first load: track() is null until this data exists
@@ -101,16 +104,53 @@ export default class Forge extends View {
     this.watched = key; const gen = ++this.watchGen;
     for (const p of paths) cx.spawn(async (cx) => { while (gen === this.watchGen) { try { await watchFolder(p); if (gen === this.watchGen) this.refresh(cx); } catch { await cx.sleep(5000); } } });
   }
+  // agents() has no status message; herdr-core does (`hc get <t> --json` → .status.msg). Polled every 5s for agents on tracks only, by the views that
+  // show reason text (sidebar, board, detail). One poll in flight per view: a hung remote `hc get` must not stack processes every tick.
+  async pollMsgs(cx) {
+    const v = props()?.view; if (v === "start" || v === "backlog" || this.polling) return;
+    this.polling = true;
+    try {
+      const on = [...new Set(this.live().flatMap((t) => t.agents.map((a) => a.address)))];
+      let changed = false;
+      await Promise.all(on.map(async (addr) => {
+        let msg = null;
+        try { const r = await hc(["get", addr, "--json"]); msg = r.code === 0 ? (JSON.parse(r.stdout || "{}").status?.msg ?? null) : null; } catch { msg = null; }
+        if ((this.msgs[addr] ?? null) !== msg) { this.msgs[addr] = msg; changed = true; }
+      }));
+      for (const k of Object.keys(this.msgs)) if (!on.includes(k)) { delete this.msgs[k]; changed = true; }
+      if (changed) cx.notify();
+    } finally { this.polling = false; }
+  }
   // Live: agents() and panes() change on their own and re-render this view; join them to tracks by cwd.
   live() {
     const ps = panes();
-    const ag = agents().map((a) => ({ address: a.address, status: a.status, cwd: ps.find((p) => p.pane === a.pane)?.cwd ?? null }));
+    const ag = agents().map((a) => ({ address: a.address, status: a.status, cwd: ps.find((p) => p.pane === a.pane)?.cwd ?? null, msg: this.msgs[a.address] ?? null }));
     return tracks({ ...this.data, agents: ag });
   }
   track() { return this.live().find((t) => t.path === props().track) ?? null; }
   narrow(px) { return this.w > 0 && this.w < px; } // false until the first layout reports a width
   repoName() { return (this.root ?? "").split("/").pop(); }
   repoUrl() { return this.data.repoUrl ?? "https://github.com"; }
+
+  // --- collapse: the docked panel resizes its own layout block (pattern: mods/workspace-chrome toggleSidebar) ---
+  // layout() is the window tree (blocks, stacks, rows); tab panes (the board, detail, backlog copies of this mod) are not nodes in it — only the docked copy is, as a block with content.mod === "forge" (verified against layouts/main-plus.json).
+  myBlock() { const find = (n) => (n?.type === "block" && n?.content?.mod === "forge" ? n : (n?.children ?? []).map(find).find(Boolean)); return find(layout()) ?? null; }
+  collapse() {
+    if (props()?.root) return; // only the docked sidebar copy folds; a sidebar opened as a tab must not resize the docked block
+    const b = this.myBlock(); if (!b) return;
+    const px = b.size?.px ?? Math.round(this.w);
+    if (px >= 100) setShared("forge.width", px); // a second click before the re-render would otherwise remember the rail width and › could never reopen
+    run("layout.resize", { id: b.id, px: RAIL });
+  }
+  expand() { const b = this.myBlock(); if (b) run("layout.resize", { id: b.id, px: Math.max(100, shared("forge.width") ?? 340) }); }
+  renderRail(cx) {
+    const t = theme(), g = grouped(this.live()), needs = g[0].items.length, flight = g[1].items.length;
+    const badge = (n, color) => div().px(5).py(1).rounded(8).text_size(10.5).font_semibold().bg(alpha(color, "22")).text_color(color).child(String(n));
+    return v_flex().id("root").size_full().bg(t.surface).items_center().pt(10).gap(10).cursor_pointer().hover((e) => e.bg(t.hover)).on_click(() => this.expand()).on_size_change(this.onSize)
+      .child(div().text_size(14).text_color(t.muted).child("›"))
+      .when(needs > 0, (e) => e.child(badge(needs, t.blocked)))
+      .when(flight > 0, (e) => e.child(badge(flight, t.accent)));
+  }
 
   // --- actions: every write is an agent's or the person's, never the panel's bookkeeping ---
   // Harness-agnostic: the agent is Herdr's most-picked installed one (knownAgents is ordered that way); no model choice here.
@@ -126,16 +166,17 @@ export default class Forge extends View {
   openStart(issue) { openOverlay({ mod: "forge", props: { view: "start", root: this.root, issue: issue?.number ?? null }, kind: "dialog", width: 720, height: 720 }); }
   // The next verb for a track, run by an agent in that worktree.
   next(t) {
+    if (!t.path) return { label: "Open PR", go: () => this.openGitHub(t.pr.url) };
     if (t.agents.some((a) => a.status === "blocked")) return { label: "Answer", go: () => run("agent.focus", { terminal: t.agents.find((a) => a.status === "blocked").address }) };
     if (t.agents.some((a) => a.status === "working")) return { label: "Open tab", go: () => run("agent.focus", { terminal: t.agents.find((a) => a.status === "working").address }) };
-    if (t.stage === 5) { // Herdr's own Remove worktree dialog closes the space it is given — only when this track has one (mods/worktree/main.js:2 documents {space, folder?, action}); otherwise an agent removes it
+    if (t.merged) { // Herdr's own Remove worktree dialog closes the space it is given — only when this track has one (mods/worktree/main.js:2 documents {space, folder?, action}); otherwise an agent removes it
       const sp = spaces().find((s) => s.folder === t.path);
       // that dialog can --force, so offer it only for a clean worktree; a dirty one goes to the agent, which never forces
       return { label: "Remove worktree", go: async () => { const st = sp ? await this.git(["status", "--porcelain"], t.path) : null; return st?.ok && !st.out ? openOverlay({ mod: "worktree", props: { action: "remove", space: sp.id, folder: t.path }, kind: "dialog" })
         : this.openAgent(this.root, `This branch is merged. Run: git worktree remove "${t.path}" (never --force; if it refuses, say why and stop), then git branch -d ${t.branch} (never -D). Then stop.`); } };
     }
     // /forge:start is the only begin verb: it reads the branch and routes (debug / brainstorm / plan / build / review); the label is for the human.
-    return { label: ["Start", "Plan", "Build", "Resume", "Review"][t.stage], go: () => this.openAgent(t.path, "/forge:start") };
+    return { label: nextLabel(t), go: () => this.openAgent(t.path, "/forge:start") };
   }
   shelve(t) { this.openAgent(t.path, "/forge:shelve"); }
 
@@ -147,9 +188,6 @@ export default class Forge extends View {
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => fn(cx)); // fn gets a fresh cx: never close over render's
   }
   link(t, id, label, url) { return this.button(t, id, `${label} ↗`, () => this.openGitHub(url)).bg(NONE).text_color(t.ansi12); }
-  pips(t, stage, color) {
-    return h_flex().gap(3).children(STAGES.map((_, i) => div().w(10).h(4).rounded(2).bg(i < stage ? t.selection : i === stage ? color : t.border)));
-  }
   groupColor(t, key) { return { needs: t.blocked, flight: t.accent, hold: t.muted, done: t.ansi2 }[key]; }
   header(t, title, right) {
     return h_flex().px(12).py(8).items_center().gap(8).flex_wrap().border_b(1).border_color(t.border)
@@ -161,29 +199,30 @@ export default class Forge extends View {
 
   // --- sidebar (default) ---
   renderSidebar(cx) {
+    if (this.w > 0 && this.w < 100) return this.renderRail(cx);
     const t = theme(), groups = grouped(this.live());
     const row = (g, s) => {
-      const color = this.groupColor(t, g.key), needs = g.key === "needs";
-      return v_flex().id(`s-${s.path}`).px(6).py(5).rounded(6).gap(3).cursor_pointer().bg(needs ? alpha(t.blocked, "14") : NONE).hover((e) => e.bg(t.hover))
-        .on_click(() => this.openDetail(s))
+      const color = this.groupColor(t, g.key), needs = g.key === "needs", key = s.path ?? "pr" + s.pr.number;
+      return v_flex().id(`s-${key}`).px(6).py(5).rounded(6).gap(3).cursor_pointer().bg(needs ? alpha(t.blocked, "14") : NONE).hover((e) => e.bg(t.hover))
+        .on_click(() => (s.path ? this.openDetail(s) : this.openGitHub(s.pr.url)))
         .child(h_flex().items_center().gap(8).min_w(0)
           .child(div().w(8).h(8).rounded(4).bg(s.agents.length ? color : t.idle))
           .child(div().flex_1().min_w(0).truncate().font_medium().child(s.slug))
           .child(MONO(div()).text_size(10.5).flex_none().text_color(t.muted).child(s.pr && s.progress.total ? `${s.progress.done}/${s.progress.total}` : s.group === "done" ? `#${s.pr.number}` : ago(s.at))))
         .child(h_flex().items_center().gap(8).pl(16).min_w(0)
-          .child(this.pips(t, s.stage, color))
           .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(needs ? t.blocked : t.muted).child(s.reason)));
     };
     return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground).on_size_change(this.onSize)
       .child(this.header(t, "Forge", [
         this.button(t, "board", "⤢", () => this.openBoard()),
         this.button(t, "start", "+", () => this.openStart()),
+        this.button(t, "fold", "‹", () => this.collapse()),
       ]))
       .when(this.error, (el) => el.child(this.empty(t, this.error)))
       .child(v_flex().flex_1().overflow_y_scroll().px(6).py(8).gap(14).children(groups.map((g) =>
         v_flex().gap(2)
           .child(h_flex().px(6).pb(4).gap(6).items_center()
-            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(g.title.toUpperCase()))
+            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(g.title.toUpperCase() + (g.key === "done" ? DONE_SUFFIX : "")))
             .child(MONO(div()).text_size(10.5).text_color(t.muted).child(String(g.items.length))))
           .children(g.items.length ? g.items.map((s) => row(g, s)) : [this.empty(t, g.key === "needs" ? "nothing waiting on you" : "none")]))))
       .child(v_flex().border_t(1).border_color(t.border)
@@ -201,26 +240,26 @@ export default class Forge extends View {
     const groups = grouped(all.filter((s) => !q || `${s.slug} ${s.branch} ${s.reason}`.toLowerCase().includes(q))).filter((g) => this.filter === "all" || g.key === this.filter);
     const chips = [["all", "All"], ["needs", "Needs you"], ["flight", "In flight"], ["hold", "On hold"], ["done", "Done"]];
     const card = (g, s) => {
-      const color = this.groupColor(t, g.key), nx = this.next(s);
+      const color = this.groupColor(t, g.key), nx = this.next(s), key = s.path ?? "pr" + s.pr.number;
       const art = (label, file) => div().px(6).py(1).rounded(4).text_size(10.5).border(1).border_color(file ? t.border : NONE).when(!file, (e) => e.border_color(t.dim).text_color(t.dim)).child(file ? label : `${label} —`);
-      return v_flex().id(`c-${s.path}`).p(12).gap(8).rounded(8).bg(t.raised).border(1).border_color(g.key === "needs" ? alpha(t.blocked, "66") : t.border).cursor_pointer().hover((e) => e.border_color(t.input))
-        .on_click(() => this.openDetail(s))
+      return v_flex().id(`c-${key}`).p(12).gap(8).rounded(8).bg(t.raised).border(1).border_color(g.key === "needs" ? alpha(t.blocked, "66") : t.border).cursor_pointer().hover((e) => e.border_color(t.input))
+        .on_click(() => (s.path ? this.openDetail(s) : this.openGitHub(s.pr.url)))
         .child(h_flex().items_center().gap(8)
           .child(div().font_semibold().flex_1().min_w(0).truncate().child(s.slug))
-          .child(div().px(6).py(1).rounded(9).text_size(10.5).flex_none().bg(alpha(color, "22")).text_color(color).child(STAGES[s.stage]))
+          .child(div().px(6).py(1).rounded(9).text_size(10.5).flex_none().bg(alpha(color, "22")).text_color(color).child(chip(s)))
           .child(MONO(div()).text_size(11).text_color(t.muted).truncate().min_w(0).flex_shrink(1).child(s.branch)))
         .child(h_flex().gap(6).items_center().flex_wrap()
-          .child(art("design", s.design)).child(art("plan", s.plan))
-          .when(s.pr, (e) => e.child(this.link(t, `pr-${s.path}`, `PR #${s.pr.number}${s.pr.isDraft ? " draft" : ""}`, s.pr.url)))
-          .children(s.issues.slice(0, 3).map((n) => this.link(t, `i-${s.path}-${n}`, `#${n}`, `${this.repoUrl()}/issues/${n}`))))
+          .when(s.path, (e) => e.child(art("design", s.design)).child(art("plan", s.plan)))
+          .when(s.pr, (e) => e.child(this.link(t, `pr-${key}`, `PR #${s.pr.number}${s.pr.isDraft ? " draft" : ""}`, s.pr.url)))
+          .children(s.issues.slice(0, 3).map((n) => this.link(t, `i-${key}-${n}`, `#${n}`, `${this.repoUrl()}/issues/${n}`))))
         .when(s.progress.total > 0, (e) => e.child(h_flex().items_center().gap(8)
           .child(div().flex_1().min_w(0).h(4).rounded(2).bg(t.border).child(div().h(4).rounded(2).bg(color).w(`${Math.round(100 * s.progress.done / s.progress.total)}%`)))
           .child(MONO(div()).text_size(10.5).text_color(t.muted).child(`${s.progress.done}/${s.progress.total}`))))
         .child(h_flex().items_center().gap(8)
           .child(div().w(8).h(8).rounded(4).bg(s.agents.length ? color : t.idle))
           .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(g.key === "needs" ? t.blocked : t.muted).child(s.agents.length ? `${s.agents.length} agent${s.agents.length > 1 ? "s" : ""} · ${s.reason}` : `${s.reason} · ${ago(s.at)}`))
-          .child(h_flex().flex_none().gap(8).child(this.button(t, `nx-${s.path}`, nx.label, nx.go, true))
-            .when(s.stage < 5, (e) => e.child(this.button(t, `sh-${s.path}`, "Shelve", () => this.shelve(s))))));
+          .child(h_flex().flex_none().gap(8).child(this.button(t, `nx-${key}`, nx.label, nx.go, true))
+            .when(!s.merged && s.path, (e) => e.child(this.button(t, `sh-${key}`, "Shelve", () => this.shelve(s))))));
     };
     const counts = grouped(all).map((g) => `${g.items.length} ${g.title.toLowerCase()}`).join(" · ");
     return v_flex().id("root").size_full().bg(t.canvas).text_size(13).text_color(t.foreground).on_size_change(this.onSize)
@@ -237,7 +276,7 @@ export default class Forge extends View {
       .child(v_flex().flex_1().overflow_y_scroll().px(12).pb(12).gap(16).children(groups.map((g) =>
         v_flex().gap(8)
           .child(h_flex().gap(6).items_center()
-            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(g.title.toUpperCase()))
+            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(g.title.toUpperCase() + (g.key === "done" ? DONE_SUFFIX : "")))
             .child(MONO(div()).text_size(10.5).text_color(t.muted).child(String(g.items.length))))
           .children(g.items.length ? g.items.map((s) => card(g, s)) : [this.empty(t, "none")]))));
   }
@@ -389,9 +428,8 @@ export default class Forge extends View {
         .when(tr.pr, (e) => e.child(this.link(t, "hpr", `PR #${tr.pr.number}`, tr.pr.url)))
         .children(tr.issues.slice(0, 3).map((n) => this.link(t, `hi-${n}`, `#${n}`, `${gh}/issues/${n}`)))
         .child(h_flex().flex_grow(1).justify_end().items_center().gap(8)
-          .child(this.pips(t, tr.stage, color))
-          .child(div().px(6).py(1).rounded(9).text_size(10.5).bg(alpha(color, "22")).text_color(color).child(STAGES[tr.stage]))
-          .when(tr.stage < 5, (e) => e.child(this.button(t, "shelve", "Shelve → issue", () => this.shelve(tr))))))
+          .child(div().px(6).py(1).rounded(9).text_size(10.5).bg(alpha(color, "22")).text_color(color).child(chip(tr)))
+          .when(!tr.merged, (e) => e.child(this.button(t, "shelve", "Shelve → issue", () => this.shelve(tr))))))
       .when(slim, (el) => el.child(h_flex().px(12).py(6).gap(8).items_center().border_b(1).border_color(t.border).text_size(12)
         .child(div().text_size(10.5).font_semibold().text_color(t.muted).flex_none().child("WAITING ON"))
         .child(div().flex_1().min_w(0).truncate().text_color(tr.group === "needs" ? t.blocked : t.foreground).child(tr.reason))

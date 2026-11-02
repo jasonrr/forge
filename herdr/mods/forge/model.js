@@ -1,7 +1,7 @@
 // Pure derivation: the panel is a function of git worktrees, the docs on each branch, gh
 // PRs/issues and the host's agents. No herdr import, so `node --test` runs it.
-export const STAGES = ["Idea", "Design", "Plan", "Build", "Review", "Merged"];
 export const GROUPS = [["needs", "Needs you"], ["flight", "In flight"], ["hold", "On hold"], ["done", "Done"]];
+export const DONE_WINDOW_MS = 7 * 86400 * 1000; // merged PRs stay under Done this long after their worktree is gone — gh is the memory, nothing is stored
 
 // `git worktree list --porcelain`: blocks of "worktree <path>\nHEAD <sha>\n(branch refs/heads/x|detached)"; the first block is the main checkout.
 export function parseWorktrees(porcelain) {
@@ -52,15 +52,6 @@ export function planTasks(planText, prBody) {
   return out;
 }
 
-function stage(t) {
-  if (t.pr?.state === "MERGED") return 5;
-  if (t.pr?.state === "OPEN" && !t.pr.isDraft) return 4;
-  if (t.pr) return 3;
-  if (t.plan) return 2;
-  if (t.design) return 1;
-  return 0;
-}
-
 function group(t) {
   const st = t.agents.map((a) => a.status);
   if (st.includes("blocked")) return "needs";
@@ -70,34 +61,63 @@ function group(t) {
   return "hold";
 }
 
+// The card's one line: what the agent says it is doing; without one, the facts on disk.
+const lead = (t) => t.agents.find((x) => x.status === "blocked") ?? t.agents.find((x) => x.status === "working") ?? t.agents[0] ?? null;
 function reason(t) {
-  if (t.agents.some((a) => a.status === "blocked")) return "agent asked you something";
+  const a = lead(t);
+  if (a?.status === "blocked") return a.msg ? `blocked · ${a.msg}` : "agent asked you something";
   if (t.group === "needs") return `review PR #${t.pr.number}`;
-  if (t.group === "flight") return `${STAGES[t.stage].toLowerCase()} · agent working`;
+  if (t.group === "flight") return a?.msg ? `working · ${a.msg}` : "working";
   if (t.group === "done") return `merged · PR #${t.pr.number}`;
-  if (t.stage === 0) return "no design yet";
-  if (t.stage === 1) return "designed, not planned";
-  if (t.stage === 2) return "planned, not built";
-  if (t.stage === 3) return `build ${t.progress.done}/${t.progress.total} · no agent`;
-  return "no agent";
+  const pr = t.pr ? `${t.pr.isDraft ? "draft " : ""}PR #${t.pr.number}` : "no PR";
+  const who = a ? `${a.status}${a.msg ? ` · ${a.msg}` : ""}` : "no agent"; // an idle or done agent is still on the track: say so, with its last message
+  return `${who} · ${t.ahead} commit${t.ahead === 1 ? "" : "s"} ahead · ${pr}`;
+}
+
+export function chip(t) { const a = lead(t); return a && (a.status === "blocked" || a.status === "working") ? a.status : t.merged ? "merged" : a?.status ?? "no agent"; } // the card's status chip: the agent that decides the group, else merged
+
+// The action button's label: the forge verb the branch is at. The PR decides first (docs vanish from `diff base...HEAD` after a rebase onto
+// merged docs, and fix/ branches never have any); then which docs exist. /forge:start routes by itself; this is for the human.
+export function nextLabel(t) {
+  if (t.pr) return t.pr.isDraft ? "Resume" : "Review";
+  if (!t.design) return "Start";
+  if (!t.plan) return "Plan";
+  return "Build";
 }
 
 const under = (cwd, path) => cwd === path || cwd.startsWith(path.endsWith("/") ? path : path + "/");
 
 export function tracks(input) {
-  return input.worktrees.filter((w) => !w.main).map((w) => {
+  const now = input.now ?? Date.now();
+  const ts = input.worktrees.filter((w) => !w.main).map((w) => {
     const d = input.docs?.[w.path] ?? {};
-    const pr = w.branch ? (input.prs ?? []).find((p) => p.headRefName === w.branch && p.state !== "CLOSED") ?? null : null; // a shelved track's closed draft PR is history, not state
+    const mine = (input.prs ?? []).filter((p) => p.headRefName === w.branch);
+    const pr = w.branch ? mine.find((p) => p.state === "OPEN") ?? mine.find((p) => p.state === "MERGED") ?? null : null; // a shelved track's closed draft PR is history, not state
     const t = {
       path: w.path, branch: w.branch ?? "(detached)", slug: w.branch ? w.branch.replace(/^[^/]+\//, "") : w.path.split("/").filter(Boolean).pop(),
       design: d.design ?? null, plan: d.plan ?? null, pr,
       agents: (input.agents ?? []).filter((a) => a.cwd && under(a.cwd, w.path)),
       issues: linked(`${pr?.body ?? ""}\n${(d.designText ?? "").split("\n").filter((l) => /\b(issue|closes|fixes|resolves|from|parked|deferred)\b/i.test(l)).join("\n")}`), // design prose mentions many #n; only issue-talking lines count
       at: input.ages?.[w.path] ?? 0,
+      ahead: input.ahead?.[w.path] ?? 0,
+      merged: pr?.state === "MERGED",
     };
-    t.stage = stage(t); t.group = group(t); t.progress = progress(pr?.body); t.reason = reason(t);
+    if (t.merged && pr.mergedAt) t.at = Date.parse(pr.mergedAt) / 1000; // Done sorts by merge time, like the PR-only items below
+    t.group = group(t); t.progress = progress(pr?.body); t.reason = reason(t);
     return t;
   });
+  // Done keeps a merged PR for DONE_WINDOW_MS after its worktree is gone. path null: no detail pane, no actions but the PR link.
+  const have = new Set(ts.map((t) => t.branch));
+  for (const p of input.prs ?? []) {
+    if (p.state !== "MERGED" || !p.mergedAt || have.has(p.headRefName) || /^(main|master)$/.test(p.headRefName)) continue; // a fork's main merged here would be a Done item named "main"
+    const ms = Date.parse(p.mergedAt);
+    if (!(now - ms >= 0 && now - ms < DONE_WINDOW_MS)) continue;
+    if (input.me && p.author?.login !== input.me) continue; // teammates' and bots' merged PRs are not this user's Done; unknown me keeps all
+    const t = { path: null, branch: p.headRefName, slug: p.headRefName.replace(/^[^/]+\//, ""), design: null, plan: null, pr: p, agents: [], issues: linked(p.body), at: ms / 1000, ahead: 0, merged: true };
+    t.group = "done"; t.progress = progress(p.body); t.reason = reason(t);
+    ts.push(t);
+  }
+  return ts;
 }
 
 export function grouped(ts) {
@@ -110,7 +130,7 @@ export function grouped(ts) {
 // issue number -> slug of the track that references it (greyed in Start work).
 export function takenIssues(ts) {
   const m = new Map();
-  for (const t of ts) for (const n of t.issues) if (!m.has(n)) m.set(n, t.slug);
+  for (const t of ts) if (!t.merged) for (const n of t.issues) if (!m.has(n)) m.set(n, t.slug); // a merged PR's body files parked issues that must stay startable
   return m;
 }
 

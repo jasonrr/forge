@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch, STAGES } from "./model.js";
+import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS } from "./model.js";
 
 const WT = "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\nworktree /r/.claude/worktrees/ring\nHEAD bbb\nbranch refs/heads/feat/ring\n\nworktree /h/.herdr/worktrees/r/fix-login\nHEAD ccc\ndetached\n\nworktree /gone\nHEAD ddd\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n";
 
@@ -50,6 +50,7 @@ function input(over = {}) {
     prs: [{ number: 55, title: "Ring", body: "Plan: docs/plans/2026-11-01-ring.md\n\n- [x] T1 — a\n- [ ] T2 — b\n\nCloses #38", url: "u", isDraft: true, state: "OPEN", headRefName: "feat/ring", mergedAt: null }],
     agents: [],
     ages: { "/r/.claude/worktrees/ring": 1000 },
+    now: Date.parse("2026-11-02T12:00:00Z"),
     ...over,
   };
 }
@@ -61,7 +62,7 @@ test("tracks: one per non-main worktree; stage, group, issues, progress", () => 
   assert.equal(t.branch, "feat/ring");
   assert.equal(t.slug, "ring");
   assert.equal(t.pr.number, 55);
-  assert.equal(STAGES[t.stage], "Build");
+  assert.equal(nextLabel(t), "Resume"); assert.equal(t.merged, false); assert.equal(t.ahead, 0);
   assert.equal(t.group, "hold");
   assert.deepEqual(t.issues, [38, 51]);
   assert.deepEqual(t.progress, { done: 1, total: 2 });
@@ -84,23 +85,9 @@ test("uppercase [X] counts as ticked", () => {
   assert.equal(planTasks("## Task 1\n**A**\n", "- [X] T1 — A\n")[0].done, true);
 });
 
-test("a draft PR with no docs is still Build", () => {
-  assert.equal(STAGES[tracks(input({ docs: {} })).find((x) => x.branch === "feat/ring").stage], "Build");
-});
-
 test("a CLOSED PR (shelved) does not count", () => {
   const t = tracks(input({ prs: [{ ...input().prs[0], state: "CLOSED" }] })).find((x) => x.branch === "feat/ring");
-  assert.equal(t.pr, null); assert.equal(STAGES[t.stage], "Plan");
-});
-
-test("stage ladder", () => {
-  const st = (over) => STAGES[tracks(input(over))[0].stage];
-  assert.equal(st({ docs: {}, prs: [] }), "Idea");
-  assert.equal(st({ docs: { "/r/.claude/worktrees/ring": { design: "d" } }, prs: [] }), "Design");
-  assert.equal(st({ docs: { "/r/.claude/worktrees/ring": { design: "d", plan: "p" } }, prs: [] }), "Plan");
-  assert.equal(st({}), "Build");
-  assert.equal(st({ prs: [{ ...input().prs[0], isDraft: false }] }), "Review");
-  assert.equal(st({ prs: [{ ...input().prs[0], state: "MERGED", mergedAt: "2026-11-01T00:00:00Z" }] }), "Merged");
+  assert.equal(t.pr, null); assert.equal(nextLabel(t), "Build");
 });
 
 test("group: blocked agent wins, then ready PR, then working, then merged, else hold", () => {
@@ -148,4 +135,80 @@ test("branchFor: a Branch: line counts only on a shelf issue", () => {
   assert.equal(shelfBranch({ title: "x", labels: [{ name: "shelved" }], body: "Branch: `feat/x`" }), "feat/x");
   assert.equal(shelfBranch({ title: "Shelved: x", labels: [], body: "Branch: `--detach`" }), null);
   assert.equal(shelfBranch(null), null);
+});
+
+test("nextLabel from facts: Start → Plan → Build → Resume → Review", () => {
+  const t = (over) => tracks(input(over)).find((x) => x.branch === "feat/ring");
+  assert.equal(nextLabel(t({ docs: {}, prs: [] })), "Start");
+  assert.equal(nextLabel(t({ docs: { "/r/.claude/worktrees/ring": { design: "d" } }, prs: [] })), "Plan");
+  assert.equal(nextLabel(t({ prs: [] })), "Build");
+  assert.equal(nextLabel(t({})), "Resume");
+  assert.equal(nextLabel(t({ prs: [{ ...input().prs[0], isDraft: false }] })), "Review");
+  assert.equal(nextLabel(t({ docs: {} })), "Resume"); // a draft PR with no docs (rebased, or a fix/ branch): the PR decides, never "Start"
+  assert.equal(nextLabel(t({ docs: {}, prs: [{ ...input().prs[0], isDraft: false }] })), "Review");
+});
+
+test("reason: the agent's message leads; without an agent, commits ahead and PR state", () => {
+  const r = (over) => tracks(input(over)).find((x) => x.branch === "feat/ring").reason;
+  const a = (status, msg) => [{ address: "t9", status, cwd: "/r/.claude/worktrees/ring", msg }];
+  assert.equal(r({ agents: a("working", "running hooks test suite") }), "working · running hooks test suite");
+  assert.equal(r({ agents: a("working", null) }), "working");
+  assert.equal(r({ agents: a("blocked", "merge order?") }), "blocked · merge order?");
+  assert.equal(r({ agents: a("blocked", null) }), "agent asked you something");
+  assert.equal(r({ ahead: { "/r/.claude/worktrees/ring": 3 } }), "no agent · 3 commits ahead · draft PR #55");
+  assert.equal(r({ ahead: { "/r/.claude/worktrees/ring": 1 }, prs: [] }), "no agent · 1 commit ahead · no PR");
+  assert.equal(r({ agents: a("idle", "committed T2"), ahead: { "/r/.claude/worktrees/ring": 2 } }), "idle · committed T2 · 2 commits ahead · draft PR #55");
+  assert.equal(r({ agents: a("done", null) }), "done · 0 commits ahead · draft PR #55");
+  assert.equal(r({ prs: [{ ...input().prs[0], isDraft: false }] }), "review PR #55");
+});
+
+test("takenIssues ignores merged tracks: a merged PR's #n must not grey open backlog issues", () => {
+  const now = input().now;
+  const ts = tracks(input({ prs: [input().prs[0], { number: 61, title: "x", body: "Filed #81 as deferred, see #82", url: "u", isDraft: false, state: "MERGED", headRefName: "fix/fresh", mergedAt: new Date(now - 86400 * 1000).toISOString() }] }));
+  assert.deepEqual([...takenIssues(ts).keys()].sort(), [38, 51]);
+});
+
+test("done: a merged PR within 7 days is a track without a worktree; older or already-tracked ones are not", () => {
+  const now = input().now;
+  const merged = (n, branch, daysAgo) => ({ number: n, title: `PR ${n}`, body: "Closes #70", url: `u${n}`, isDraft: false, state: "MERGED", headRefName: branch, mergedAt: new Date(now - daysAgo * 86400 * 1000).toISOString() });
+  const ts = tracks(input({ prs: [input().prs[0], merged(60, "feat/old", 8), merged(61, "fix/fresh", 2), merged(62, "feat/ring", 1)] }));
+  const done = ts.filter((t) => t.group === "done");
+  assert.deepEqual(done.map((t) => [t.pr.number, t.path, t.slug, t.branch, t.merged]), [[61, null, "fresh", "fix/fresh", true]]);
+  assert.equal(done[0].reason, "merged · PR #61");
+  assert.deepEqual(done[0].issues, [70]);
+  assert.equal(done[0].at, Date.parse(done[0].pr.mergedAt) / 1000);
+  assert.equal(ts.filter((t) => t.branch === "feat/ring").length, 1); // the worktree's own track wins over the PR-only one
+  assert.equal(DONE_WINDOW_MS, 7 * 86400 * 1000);
+});
+
+test("done: with a known user only their own merged PRs are Done items; unknown user keeps all", () => {
+  const now = input().now, at = new Date(now - 86400 * 1000).toISOString();
+  const pr = (n, branch, login) => ({ number: n, title: `PR ${n}`, body: "", url: `u${n}`, isDraft: false, state: "MERGED", headRefName: branch, mergedAt: at, author: { login } });
+  const prs = [pr(70, "fix/mine", "jr"), pr(71, "dependabot/npm/x", "dependabot[bot]")];
+  const done = (me) => tracks(input({ prs, me })).filter((t) => t.group === "done").map((t) => t.branch);
+  assert.deepEqual(done("jr"), ["fix/mine"]);
+  assert.deepEqual(done(null).sort(), ["dependabot/npm/x", "fix/mine"]);
+});
+
+test("a worktree whose PR merged is done and dated by the merge, and shows the merged PR", () => {
+  const t = tracks(input({ prs: [{ ...input().prs[0], state: "MERGED", mergedAt: "2026-11-01T00:00:00Z" }] })).find((x) => x.branch === "feat/ring");
+  assert.equal(t.group, "done"); assert.equal(t.merged, true); assert.equal(t.at, Date.parse("2026-11-01T00:00:00Z") / 1000);
+  assert.equal(t.reason, "merged · PR #55"); assert.equal(t.path, "/r/.claude/worktrees/ring");
+});
+
+test("a reused branch: an open PR wins over an old merged one listed first", () => {
+  const t = tracks(input({ prs: [{ ...input().prs[0], number: 40, state: "MERGED", mergedAt: "2026-10-01T00:00:00Z" }, input().prs[0]] })).find((x) => x.branch === "feat/ring");
+  assert.equal(t.pr.number, 55); assert.equal(t.merged, false);
+});
+
+test("chip: a blocked or working agent wins, then merged, then the first agent, then no agent", () => {
+  const t = (over) => tracks(input(over)).find((x) => x.branch === "feat/ring");
+  const a = (...st) => st.map((status, i) => ({ address: `t${i}`, status, cwd: "/r/.claude/worktrees/ring" }));
+  const merged = { prs: [{ ...input().prs[0], state: "MERGED", mergedAt: "2026-11-01T00:00:00Z" }] };
+  assert.equal(chip(t({ agents: a("idle", "blocked") })), "blocked");
+  assert.equal(chip(t({ agents: a("idle", "working") })), "working");
+  assert.equal(chip(t({ ...merged, agents: a("working") })), "working");
+  assert.equal(chip(t({ ...merged, agents: a("idle") })), "merged");
+  assert.equal(chip(t({ agents: a("done") })), "done");
+  assert.equal(chip(t({})), "no agent");
 });
