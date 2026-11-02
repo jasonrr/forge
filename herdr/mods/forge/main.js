@@ -349,12 +349,12 @@ export default class Forge extends View {
           .when(rows.length > this.shown, (e) => e.child(this.button(t, "more", "Load 50 more", (cx) => { this.shown += 50; cx.notify(); })))));
   }
   initDetail(cx) {
-    this.tab = "design"; this.docs = {}; this.editing = false; this.editor = null; this.saveMsg = null; this.log = [];
+    this.tab = "design"; this.docs = {}; this.editing = false; this.editor = null; this.saveMsg = null; this.log = []; this.reloading = false;
     cx.spawn(async (cx) => { for (;;) {
       if (this.on) { // watchFolder is this computer only: poll a remote track, and stop once its worktree is gone
         await cx.sleep(GH_EVERY);
         if (this.data.worktrees.length && !this.track()) return;
-        if (!this.editing) this.loadDoc(cx, true);
+        if (!this.editing && !this.reloading) this.loadDoc(cx, true);
         continue;
       }
       try { await watchFolder(`${props().track}/docs`); } catch { if (this.data.worktrees.length && !this.track()) return; await cx.sleep(5000); continue; }
@@ -366,15 +366,18 @@ export default class Forge extends View {
   loadDoc(cx, reload = false) {
     cx.spawn(async (cx) => {
       const tr = this.track(); if (!tr) return;
-      const docs = reload ? {} : this.docs;
-      for (const key of ["design", "plan"]) {
-        if (!reload && docs[key] && docs[key].rel !== tr[key] && !this.editing) delete docs[key]; // a renamed file must reload
-        const rel = tr[key]; if (!rel || docs[key]) continue;
-        try { docs[key] = { rel, text: (await readTextFile(`${tr.path}/${rel}`, { on: this.on })) ?? "" }; } catch (e) { docs[key] = { rel, text: null, err: String(e) }; } // text null = unreadable: shown, never editable
-      }
-      if (reload) { if (this.editing) return; this.docs = docs; }
-      this.log = (await this.git(["log", "-6", "--format=%h%x09%s%x09%cr"], tr.path)).out.split("\n").filter(Boolean).map((l) => l.split("\t"));
-      cx.notify();
+      if (reload) this.reloading = true;
+      try {
+        const docs = reload ? {} : this.docs;
+        for (const key of ["design", "plan"]) {
+          if (!reload && docs[key] && docs[key].rel !== tr[key] && !this.editing) delete docs[key]; // a renamed file must reload
+          const rel = tr[key]; if (!rel || docs[key]) continue;
+          try { docs[key] = { rel, text: (await readTextFile(`${tr.path}/${rel}`, { on: this.on })) ?? "" }; } catch (e) { const old = this.docs[key]; docs[key] = reload && old?.rel === rel && old.text != null ? old : { rel, text: null, err: String(e) }; } // text null = unreadable: shown, never editable
+        }
+        if (reload) { if (this.editing) return; this.docs = docs; }
+        this.log = (await this.git(["log", "-6", "--format=%h%x09%s%x09%cr"], tr.path)).out.split("\n").filter(Boolean).map((l) => l.split("\t"));
+        cx.notify();
+      } finally { if (reload) this.reloading = false; }
     });
   }
   edit(cx) {
