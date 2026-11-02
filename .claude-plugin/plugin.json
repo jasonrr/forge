@@ -1,7 +1,7 @@
 {
   "name": "forge",
   "description": "Forge — a code factory for agents: brainstorm → plan → build in fresh worktrees → adversarial branch review → PR. Designs and plans are committed files, the task ledger is a draft PR checklist, follow-ups are GitHub issues. Needs only git and gh.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "author": { "name": "Jason Rosoff" },
   "homepage": "https://github.com/jasonrr/forge",
   "repository": "https://github.com/jasonrr/forge",

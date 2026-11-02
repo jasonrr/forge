@@ -1,6 +1,6 @@
 {
   "name": "forge",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Forge — a code factory for agents, as a pi package: /forge:* skills plus the routing extension.",
   "keywords": ["pi-package"],
   "license": "MIT",
