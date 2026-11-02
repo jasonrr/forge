@@ -9,6 +9,7 @@ import { writeFile, mkdir } from "fs/promises"; // allowed: writes under ~/.conf
 import { STAGES, parseWorktrees, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch } from "./model.js";
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
+const GH_EVERY = 30000; // gh is called at most this often per view (GraphQL budget: 5000 pts/h per user; one refresh ≈ 1 pt per 100 PRs or issues)
 const MONO = (el) => el.font_family(settings().font_family); // the terminal's mono font (AGENTS.md: settings().font_family)
 const ago = (sec) => { const d = Math.max(0, Date.now() / 1000 - sec); return d < 3600 ? `${Math.floor(d / 60)}m` : d < 86400 ? `${Math.floor(d / 3600)}h` : `${Math.floor(d / 86400)}d`; };
 const since = (iso) => ago(Date.parse(iso) / 1000);
@@ -37,7 +38,7 @@ export default class Forge extends View {
     if (props()?.view === "start") this.initStart(cx);
     if (props()?.track) this.initDetail(cx);
     this.refresh(cx);
-    cx.timer.every(60000, (cx) => this.refresh(cx)); // ponytail: gh polled once a minute; the folder watch covers files, agents() re-renders by itself
+    cx.timer.every(GH_EVERY, (cx) => this.refresh(cx)); // the folder watch covers files, agents() re-renders by itself
     cx.timer.every(5000, (cx) => this.relocate(cx)); // the sidebar follows the shown space
   }
 
@@ -78,7 +79,9 @@ export default class Forge extends View {
         docs[w.path] = { design, plan, designText };
         ages[w.path] = Number((await this.git(["log", "-1", "--format=%ct"], w.path)).out) || 0;
       }));
-      const [prs, issues] = await Promise.all([
+      // ponytail: per-view throttle — docs/ bursts (builds, rebases) reuse the cached lists; one shared cache across views if several open panels ever matter
+      const ghFresh = this.ghRoot === root && Date.now() - this.ghAt < GH_EVERY - 1000;
+      const [prs, issues] = ghFresh ? [this.data.prs, this.data.issues] : await Promise.all([
         this.gh(["pr", "list", "--state", "all", "--limit", "200", "--json", "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt"]),
         this.gh(["issue", "list", "--state", "open", "--limit", "500", "--json", "number,title,body,url,labels,author,createdAt"]),
       ]);
@@ -86,7 +89,7 @@ export default class Forge extends View {
       const repoUrl = this.data.repoUrl || (await exec("gh", ["repo", "view", "--json", "url", "-q", ".url"], { cwd: this.root }).catch(() => ({}))).stdout?.trim() || null;
       if (seq !== this.seq || root !== this.root) return;
       this.data = { worktrees: wt, docs, prs: prs ?? this.data.prs, issues: issues ?? this.data.issues, ages, me, repoUrl };
-      this.error = prs ? null : "gh unavailable — PRs and issues may be stale";
+      if (!ghFresh) { this.ghAt = Date.now(); this.ghRoot = root; this.error = prs ? null : "gh unavailable — PRs and issues may be stale"; }
       this.fetched = Date.now();
       if (props()?.track) this.loadDoc(cx); // the detail pane's first load: track() is null until this data exists
       cx.notify();
