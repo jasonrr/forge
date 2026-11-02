@@ -147,6 +147,13 @@ export default class Forge extends View {
   track() { return this.live().find((t) => t.path === props().track) ?? null; }
   narrow(px) { return this.w > 0 && this.w < px; } // false until the first layout reports a width
   repoName() { return (this.root ?? "").split("/").pop(); }
+  // That machine's home: Herdr's worktree path rule is ~/.herdr/worktrees/<repo>/<branch-with-dashes> on the space's machine. Pattern: mods/worktree/main.js:136.
+  async homeOn() {
+    if (!this.on) return home();
+    const r = await exec("sh", ["-c", 'printf %s "$HOME"'], { on: this.on }); // rejects if unreachable: start()'s catch shows it
+    if (r.code !== 0 || !r.stdout.trim()) throw new Error(`can't read the home folder on ${this.on}`);
+    return r.stdout.trim();
+  }
   repoUrl() { return this.data.repoUrl ?? "https://github.com"; }
 
   // --- collapse: the docked panel resizes its own layout block (pattern: mods/workspace-chrome toggleSidebar) ---
@@ -172,9 +179,9 @@ export default class Forge extends View {
   // --- actions: every write is an agent's or the person's, never the panel's bookkeeping ---
   // Harness-agnostic: the agent is Herdr's most-picked installed one (knownAgents is ordered that way); no model choice here.
   async openAgent(path, task) {
-    const argv = (await knownAgents()).find((a) => a.installed)?.run ?? ["claude"];
-    const space = spaces().find((s) => s.folder === path); // ponytail: folder match; a space made by Start/worktree mod has exactly this folder
-    if (space) run("tab.new", { space: space.id, argv, task }); else run("space.new", { folder: path, argv, task });
+    const argv = (await knownAgents({ on: this.on })).find((a) => a.installed)?.run ?? ["claude"];
+    const space = spaces().find((s) => s.folder === path && (s.machine ?? null) === this.on); // ponytail: folder match; a space made by Start/worktree mod has exactly this folder
+    if (space) run("tab.new", { space: space.id, argv, task }); else run("space.new", { folder: path, machine: this.on, argv, task });
   }
   openGitHub(url) { exec("open", [url]); }
   openBoard() { run("tab.new", { name: "Forge", space: location().space, mod: "forge", props: { view: "board", root: this.root, on: this.on } }); }
@@ -187,7 +194,7 @@ export default class Forge extends View {
     if (t.agents.some((a) => a.status === "blocked")) return { label: "Answer", go: () => run("agent.focus", { terminal: t.agents.find((a) => a.status === "blocked").address }) };
     if (t.agents.some((a) => a.status === "working")) return { label: "Open tab", go: () => run("agent.focus", { terminal: t.agents.find((a) => a.status === "working").address }) };
     if (t.merged) { // Herdr's own Remove worktree dialog closes the space it is given — only when this track has one (mods/worktree/main.js:2 documents {space, folder?, action}); otherwise an agent removes it
-      const sp = spaces().find((s) => s.folder === t.path);
+      const sp = spaces().find((s) => s.folder === t.path && (s.machine ?? null) === this.on);
       // that dialog can --force, so offer it only for a clean worktree; a dirty one goes to the agent, which never forces
       return { label: "Remove worktree", go: async () => { const st = sp ? await this.git(["status", "--porcelain"], t.path) : null; return st?.ok && !st.out ? openOverlay({ mod: "worktree", props: { action: "remove", space: sp.id, folder: t.path }, kind: "dialog" })
         : this.openAgent(this.root, `This branch is merged. Run: git worktree remove "${t.path}" (never --force; if it refuses, say why and stop), then git branch -d ${t.branch} (never -D). Then stop.`); } };
@@ -481,7 +488,7 @@ export default class Forge extends View {
       await this.git(["fetch", "-q", "origin", "main"]);
       const has = async (b) => (await this.git(["show-ref", "--verify", "--quiet", `refs/heads/${b}`])).ok;
       const onOrigin = async (b) => { // exit 2 = no such branch; anything else non-zero (network, auth) must not pass for "absent"
-        const r = await exec("git", [...GIT, "ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${b}`], { cwd: this.root });
+        const r = await exec("git", [...GIT, "ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${b}`], { cwd: this.root, on: this.on });
         if (r.code === 2) return false;
         if (r.code !== 0) throw new Error(`can't check origin for ${b}: ${(r.stderr || "git ls-remote failed").trim()}`);
         return true;
@@ -498,8 +505,8 @@ export default class Forge extends View {
         if (!f.ok) throw new Error(`could not fetch ${branch} from origin`);
         exists = true;
       } else if (fromShelf && exists && await onOrigin(branch)) await this.git(["fetch", "-q", "origin", `${branch}:${branch}`]); // fast-forward a stale local shelf branch; a non-ff or checked-out branch is left as is
-      const path = `${home()}/.herdr/worktrees/${this.repoName()}/${branch.replace(/\//g, "-")}`; // Herdr's worktree path rule: branch with / as -
-      const r = await exec("git", [...GIT, "worktree", "add", ...(exists ? [path, branch] : ["--no-track", "-b", branch, path, this.base])], { cwd: this.root });
+      const path = `${await this.homeOn()}/.herdr/worktrees/${this.repoName()}/${branch.replace(/\//g, "-")}`; // Herdr's worktree path rule: branch with / as -
+      const r = await exec("git", [...GIT, "worktree", "add", ...(exists ? [path, branch] : ["--no-track", "-b", branch, path, this.base])], { cwd: this.root, on: this.on });
       if (r.code !== 0) { this.busy = (r.stderr || "git worktree add failed").trim(); cx.notify(); return; }
       const extra = this.mode === "issue" ? "" : this.brief.value().trim();
       const task = issue ? `/forge:start #${issue.number}` : `/forge:start ${title}${extra ? `\n\n${extra}` : ""}${this.alsoIssue ? "\n\nAlso open a GitHub issue for this so it shows in the backlog if it stalls." : ""}`;
