@@ -4,12 +4,13 @@
 // from git worktrees, the docs on each branch, gh PRs/issues and the host's agents.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
-import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, hc } from "herdr";
+import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, hc, layout, setShared, shared } from "herdr";
 import { writeFile, mkdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app (AGENTS.md "Other built-ins")
 import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, grouped, takenIssues, isParked, branchFor, shelfBranch } from "./model.js";
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const GH_EVERY = 30000; // gh is called at most this often per view (GraphQL budget: 5000 pts/h per user; one refresh ≈ 1 pt per 100 PRs or issues)
+const RAIL = 44; // the folded width; the sidebar mod uses 44 too (76 on macOS only because of the traffic lights, which this panel never sits under)
 const MONO = (el) => el.font_family(settings().font_family); // the terminal's mono font (AGENTS.md: settings().font_family)
 const ago = (sec) => { const d = Math.max(0, Date.now() / 1000 - sec); return d < 3600 ? `${Math.floor(d / 60)}m` : d < 86400 ? `${Math.floor(d / 3600)}h` : `${Math.floor(d / 86400)}d`; };
 const since = (iso) => ago(Date.parse(iso) / 1000);
@@ -130,6 +131,26 @@ export default class Forge extends View {
   repoName() { return (this.root ?? "").split("/").pop(); }
   repoUrl() { return this.data.repoUrl ?? "https://github.com"; }
 
+  // --- collapse: the docked panel resizes its own layout block (pattern: mods/workspace-chrome toggleSidebar) ---
+  // layout() is the window tree (blocks, stacks, rows); tab panes (the board, detail, backlog copies of this mod) are not nodes in it — only the docked copy is, as a block with content.mod === "forge" (verified against layouts/main-plus.json).
+  myBlock() { const find = (n) => (n?.type === "block" && n?.content?.mod === "forge" ? n : (n?.children ?? []).map(find).find(Boolean)); return find(layout()) ?? null; }
+  collapse() {
+    if (props()?.root) return; // only the docked sidebar copy folds; a sidebar opened as a tab must not resize the docked block
+    const b = this.myBlock(); if (!b) return;
+    const px = b.size?.px ?? Math.round(this.w);
+    if (px >= 100) setShared("forge.width", px); // a second click before the re-render would otherwise remember the rail width and › could never reopen
+    run("layout.resize", { id: b.id, px: RAIL });
+  }
+  expand() { const b = this.myBlock(); if (b) run("layout.resize", { id: b.id, px: Math.max(100, shared("forge.width") ?? 340) }); }
+  renderRail(cx) {
+    const t = theme(), g = grouped(this.live()), needs = g[0].items.length, flight = g[1].items.length;
+    const badge = (n, color) => div().px(5).py(1).rounded(8).text_size(10.5).font_semibold().bg(alpha(color, "22")).text_color(color).child(String(n));
+    return v_flex().id("root").size_full().bg(t.surface).items_center().pt(10).gap(10).cursor_pointer().hover((e) => e.bg(t.hover)).on_click(() => this.expand()).on_size_change(this.onSize)
+      .child(div().text_size(14).text_color(t.muted).child("›"))
+      .when(needs > 0, (e) => e.child(badge(needs, t.blocked)))
+      .when(flight > 0, (e) => e.child(badge(flight, t.accent)));
+  }
+
   // --- actions: every write is an agent's or the person's, never the panel's bookkeeping ---
   // Harness-agnostic: the agent is Herdr's most-picked installed one (knownAgents is ordered that way); no model choice here.
   async openAgent(path, task) {
@@ -177,6 +198,7 @@ export default class Forge extends View {
 
   // --- sidebar (default) ---
   renderSidebar(cx) {
+    if (this.w > 0 && this.w < 100) return this.renderRail(cx);
     const t = theme(), groups = grouped(this.live());
     const row = (g, s) => {
       const color = this.groupColor(t, g.key), needs = g.key === "needs", key = s.path ?? "pr" + s.pr.number;
@@ -193,6 +215,7 @@ export default class Forge extends View {
       .child(this.header(t, "Forge", [
         this.button(t, "board", "⤢", () => this.openBoard()),
         this.button(t, "start", "+", () => this.openStart()),
+        this.button(t, "fold", "‹", () => this.collapse()),
       ]))
       .when(this.error, (el) => el.child(this.empty(t, this.error)))
       .child(v_flex().flex_1().overflow_y_scroll().px(6).py(8).gap(14).children(groups.map((g) =>
