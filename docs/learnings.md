@@ -11,3 +11,5 @@
 ## herdr-work-panel (PR #11, 2026-11-02)
 
 - A plan step that copies from a live user folder (~/.config/herdr-app/mods/forge) → the operator may delete it mid-build, and deleting the folder also deletes the install symlink placed there; plans should vendor the source into the repo at plan time and verify the symlink at each later task, not only in Task 1.
+- A gpui-kit mod helper named `close` → Herdr calls `close(cx)` as the View's lifecycle hook when its tab goes away → a helper that runs `tab.close` then closes the *focused* tab, i.e. the agent that opened the check tab, and its space; it killed the build twice. Never name a View method after a lifecycle hook (check AGENTS.md "Cleanup"), and never write an unscoped `tab.close` in a mod or a verify line: close only a captured id.
+- A plan that reuses an instance field across tasks (`this.base` = git base ref in Task 3, the editor's merge base in Task 5) → a later task silently clobbers state an earlier task's render reads; grep the plan for every `this.<field>` assignment before handing out tasks.
