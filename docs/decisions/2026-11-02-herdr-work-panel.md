@@ -34,3 +34,7 @@ Forge's artifacts (designs in `docs/decisions`, plans in `docs/plans`, the draft
 ## Open questions
 
 None deferred. Resolved while drafting: On hold has no day threshold (no agent = on hold); issue kind is shown from labels only and never used to decide; reader edits merge stale saves with `git merge-file` and hand true overlaps to an agent tab; `/forge:start` is the only entry point and routes by reading, replacing the old mod's "+ Brainstorm".
+
+## Deviations
+
+- T1 commit 14b4bfe — deviation: publish.sh test line was 28 not 27; the old mod's main.js was copied verbatim before the operator deleted ~/.config/herdr-app/mods/forge (dispatcher then asked for a placeholder instead — moot, Task 3 rewrites it); that deletion also removed the install symlink, re-created by re-running the script; a backup of the old mod remains at ~/.config/herdr-app/forge-mod.bak-20261102101301 — parked: none

@@ -7,3 +7,7 @@
 - A worktree fallback written as one shell line ending in `cd "$WT"` → harnesses that run each command in a fresh process (Codex) lose the cd; say "run later commands in $WT" explicitly. Also: the rtk-wrapped `grep` in this shell miscounts patterns containing `$`; run verify greps with /usr/bin/grep.
 - `.trim()` on a subprocess path is not `$(...)`: bash strips only trailing newlines, so a TS port must use `.replace(/
 +$/, "")`, or parity breaks on paths that end in whitespace.
+
+## herdr-work-panel (PR #11, 2026-11-02)
+
+- A plan step that copies from a live user folder (~/.config/herdr-app/mods/forge) → the operator may delete it mid-build, and deleting the folder also deletes the install symlink placed there; plans should vendor the source into the repo at plan time and verify the symlink at each later task, not only in Task 1.
