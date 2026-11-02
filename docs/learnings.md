@@ -30,3 +30,6 @@
 
 - A remote space vanishes from spaces() while its machine layout loads, which hits every space lookup, not only the agent join → plan each spaces().find for the missing-space case (location() needed a guard the plan only gave agentsOn).
 - exec rejecting means two things: missing cwd locally, unreachable remotely → branch on machine before deciding to keep or wipe data.
+- hc exec --on allows 16 concurrent execs per machine, and each open panel view refreshes on its own timer → never fan out per-worktree execs in parallel on a remote, and treat a rejected exec as "could not run", not as an empty result.
+- `command -v herdr-app` only proves the binary exists; a Mac with no Herdr window fails every herdr-app call with exit 2 → gate desktop-app steps on `herdr-app status`.
+- The forge repo is public: a manual check run on a private repo must be written up generically (the auto-mode classifier blocked a PR body naming private branches).
