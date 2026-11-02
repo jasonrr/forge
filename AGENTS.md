@@ -1,9 +1,10 @@
 # AGENTS.md
 
-Forge is skills + one hook + one pi extension, packaged for Claude Code (`.claude-plugin/`), Codex (`.codex-plugin/`, `.agents/plugins/`) and pi (`package.json`). No binary, no build step, no store.
+Forge is skills + one hook + one pi extension + one Herdr desktop-app mod, packaged for Claude Code (`.claude-plugin/`), Codex (`.codex-plugin/`, `.agents/plugins/`) and pi (`package.json`). No binary, no build step, no store.
 
-- `skills/*/SKILL.md` — the six skills. They branch on `$HC_TERMINAL_ID` (Herdr desktop app), then `HERDR_ENV=1` (old herdr), else plain Claude Code. Verify any `hc`/`herdr`/`herdr-app` flag against `--help` or `--skill` before changing those steps.
+- `skills/*/SKILL.md` — the eight skills. They branch on `$HC_TERMINAL_ID` (Herdr desktop app), then `HERDR_ENV=1` (old herdr), else plain Claude Code. Verify any `hc`/`herdr`/`herdr-app` flag against `--help` or `--skill` before changing those steps.
 - `hooks/routing.md` is the single copy of the routing block. `hooks/session-start.sh` (Claude) and `pi/extensions/routing.ts` (pi) both read it. Config: `.claude/dev-loop.md`, falling back to `.claude/tally-dev-loop.md`; exact-line match on `routing: on`.
+- `herdr/mods/forge/` — the Herdr work panel (gpui-kit JS; API in `~/.config/herdr-app/AGENTS.md`). `scripts/install-herdr-mod.sh` symlinks it to `~/.config/herdr-app/mods/forge`; `herdr-app check herdr/mods/forge` is its test and publish runs it when Herdr is installed. `model.js` is pure JS so `node --test herdr/mods/forge/model.test.js` covers the derivation.
 - Test: `bash hooks/session-start.test.sh`; `node --experimental-strip-types --input-type=module -e 'await import(new URL("pi/extensions/routing.ts", "file://" + process.cwd() + "/"))'`.
 - Release: see **Shipping** below. `claude plugin update forge@forge` keys off the `version` in `.claude-plugin/plugin.json`, so an unbumped change never reaches an installed copy. Codex runs the same `hooks/hooks.json`; it sets `CLAUDE_PLUGIN_ROOT` but not `CLAUDE_PROJECT_DIR`, so the hook falls back to the cwd and its git toplevel.
 
