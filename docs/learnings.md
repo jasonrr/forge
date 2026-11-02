@@ -25,3 +25,11 @@
 - Repointing the mod symlink at a worktree mid-session → fresh tabs load the new code but the already-docked copy keeps the old build (it does not hot-reload across a symlink target change), and `herdr-app shot` returns the last painted frame, which stops changing when the window is not repainting → a plan that verifies the docked panel should have the human reopen it (or restart the app) after the install step, not try to remount it with `layout.hide`/`layout.show` from the CLI.
 - A Done list sourced from `gh pr list --state all` → it includes every author's and every bot's merges; any view built from repo-wide PRs needs an author filter against `gh api user`, decided at design time, not found in review.
 - Picking a branch's PR by state (open, else merged) → a re-created branch name inherits an old merged PR; a design that keys tracks on branch names should say how a reused name is told apart (merge time vs first commit).
+
+## support-connected-machines (PR #22, 2026-11-02)
+
+- A remote space vanishes from spaces() while its machine layout loads, which hits every space lookup, not only the agent join → plan each spaces().find for the missing-space case (location() needed a guard the plan only gave agentsOn).
+- exec rejecting means two things: missing cwd locally, unreachable remotely → branch on machine before deciding to keep or wipe data.
+- hc exec --on allows 16 concurrent execs per machine, and each open panel view refreshes on its own timer → never fan out per-worktree execs in parallel on a remote, and treat a rejected exec as "could not run", not as an empty result.
+- `command -v herdr-app` only proves the binary exists; a Mac with no Herdr window fails every herdr-app call with exit 2 → gate desktop-app steps on `herdr-app status`.
+- The forge repo is public: a manual check run on a private repo must be written up generically (the auto-mode classifier blocked a PR body naming private branches).
