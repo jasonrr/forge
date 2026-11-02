@@ -349,18 +349,29 @@ export default class Forge extends View {
   }
   initDetail(cx) {
     this.tab = "design"; this.docs = {}; this.editing = false; this.editor = null; this.saveMsg = null; this.log = [];
-    cx.spawn(async (cx) => { for (;;) { try { await watchFolder(`${props().track}/docs`); } catch { if (this.data.worktrees.length && !this.track()) return; await cx.sleep(5000); continue; } if (!this.editing) { this.docs = {}; this.loadDoc(cx); } } }); // ends only when the worktree is gone (a missing docs/ retries every 5 s); while editing, save() reconciles instead
+    cx.spawn(async (cx) => { for (;;) {
+      if (this.on) { // watchFolder is this computer only: poll a remote track, and stop once its worktree is gone
+        await cx.sleep(GH_EVERY);
+        if (this.data.worktrees.length && !this.track()) return;
+        if (!this.editing) this.loadDoc(cx, true);
+        continue;
+      }
+      try { await watchFolder(`${props().track}/docs`); } catch { if (this.data.worktrees.length && !this.track()) return; await cx.sleep(5000); continue; }
+      if (!this.editing) { this.docs = {}; this.loadDoc(cx); }
+    } }); // ends only when the worktree is gone (a missing docs/ retries every 5 s); while editing, save() reconciles instead
     this.loadDoc(cx);
   }
-  // Reads the shown tab's file once per change; `expected` is the text on disk when it was read.
-  loadDoc(cx) {
+  // Reads the shown tab's file once per change; `expected` is the text on disk when it was read. reload: re-read everything, swap in when done.
+  loadDoc(cx, reload = false) {
     cx.spawn(async (cx) => {
       const tr = this.track(); if (!tr) return;
+      const docs = reload ? {} : this.docs;
       for (const key of ["design", "plan"]) {
-        if (this.docs[key] && this.docs[key].rel !== tr[key] && !this.editing) delete this.docs[key]; // a renamed file must reload
-        const rel = tr[key]; if (!rel || this.docs[key]) continue;
-        try { this.docs[key] = { rel, text: (await readTextFile(`${tr.path}/${rel}`)) ?? "" }; } catch (e) { this.docs[key] = { rel, text: null, err: String(e) }; } // text null = unreadable: shown, never editable
+        if (!reload && docs[key] && docs[key].rel !== tr[key] && !this.editing) delete docs[key]; // a renamed file must reload
+        const rel = tr[key]; if (!rel || docs[key]) continue;
+        try { docs[key] = { rel, text: (await readTextFile(`${tr.path}/${rel}`, { on: this.on })) ?? "" }; } catch (e) { docs[key] = { rel, text: null, err: String(e) }; } // text null = unreadable: shown, never editable
       }
+      if (reload) { if (this.editing) return; this.docs = docs; }
       this.log = (await this.git(["log", "-6", "--format=%h%x09%s%x09%cr"], tr.path)).out.split("\n").filter(Boolean).map((l) => l.split("\t"));
       cx.notify();
     });
@@ -444,7 +455,7 @@ export default class Forge extends View {
           .child(div().w(7).h(7).rounded(4).bg(t[a.status] ?? t.idle)).child(MONO(div()).child(a.address)).child(div().text_color(t.muted).child(a.status))) : [div().text_color(t.dim).child("none")]))
       .child(v_flex().gap(4).child(div().text_size(10.5).font_semibold().text_color(t.muted).child("ACTIVITY"))
         .children(this.log.length ? this.log.map(([h, s, when]) => v_flex().min_w(0).child(div().truncate().child(s)).child(MONO(div()).text_size(10.5).text_color(t.dim).child(`${h} · ${when}`))) : [div().text_color(t.dim).child("no commits yet")]));
-    const canEdit = (this.tab === "design" || this.tab === "plan") && this.docs[this.tab]?.text != null;
+    const canEdit = !this.on && (this.tab === "design" || this.tab === "plan") && this.docs[this.tab]?.text != null;
     return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground).on_size_change(this.onSize)
       .child(h_flex().px(12).py(8).gap(8).items_center().flex_wrap().border_b(1).border_color(t.border)
         .child(div().font_semibold().text_size(14).truncate().min_w(0).child(tr.slug))
