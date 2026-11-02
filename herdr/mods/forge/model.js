@@ -17,8 +17,8 @@ export function parseWorktrees(porcelain) {
 }
 
 export function progress(body) {
-  const boxes = (body ?? "").match(/^- \[[ x]\] T\d+\b/gm) ?? []; // only the ledger's task lines, not any checkbox in the body
-  return { done: boxes.filter((b) => b.includes("x")).length, total: boxes.length };
+  const boxes = (body ?? "").match(/^- \[[ xX]\] T\d+\b/gm) ?? []; // only the ledger's task lines, not any checkbox in the body
+  return { done: boxes.filter((b) => /x/i.test(b)).length, total: boxes.length };
 }
 
 // #n references, once each, in order of first appearance; not inside words (abc#9).
@@ -41,7 +41,7 @@ export function kind(issue) {
 
 // `## Task N` + next-line **title** from the plan, ticked from the PR body's `- [x] TN`.
 export function planTasks(planText, prBody) {
-  const ticked = new Set([...(prBody ?? "").matchAll(/^- \[x\] T(\d+)\b/gm)].map((m) => Number(m[1])));
+  const ticked = new Set([...(prBody ?? "").matchAll(/^- \[[xX]\] T(\d+)\b/gm)].map((m) => Number(m[1])));
   const lines = (planText ?? "").split("\n"), out = [];
   lines.forEach((l, i) => {
     const m = /^## Task (\d+)\s*$/.exec(l);
@@ -55,7 +55,7 @@ export function planTasks(planText, prBody) {
 function stage(t) {
   if (t.pr?.state === "MERGED") return 5;
   if (t.pr?.state === "OPEN" && !t.pr.isDraft) return 4;
-  if (t.plan && t.pr) return 3;
+  if (t.pr) return 3;
   if (t.plan) return 2;
   if (t.design) return 1;
   return 0;
@@ -85,13 +85,13 @@ function reason(t) {
 const under = (cwd, path) => cwd === path || cwd.startsWith(path.endsWith("/") ? path : path + "/");
 
 export function tracks(input) {
-  return input.worktrees.filter((w) => !w.main && w.branch).map((w) => {
+  return input.worktrees.filter((w) => !w.main).map((w) => {
     const d = input.docs?.[w.path] ?? {};
-    const pr = input.prs.find((p) => p.headRefName === w.branch && p.state !== "CLOSED") ?? null; // a shelved track's closed draft PR is history, not state
+    const pr = w.branch ? (input.prs ?? []).find((p) => p.headRefName === w.branch && p.state !== "CLOSED") ?? null : null; // a shelved track's closed draft PR is history, not state
     const t = {
-      path: w.path, branch: w.branch, slug: w.branch.replace(/^[^/]+\//, ""),
+      path: w.path, branch: w.branch ?? "(detached)", slug: w.branch ? w.branch.replace(/^[^/]+\//, "") : w.path.split("/").filter(Boolean).pop(),
       design: d.design ?? null, plan: d.plan ?? null, pr,
-      agents: input.agents.filter((a) => a.cwd && under(a.cwd, w.path)),
+      agents: (input.agents ?? []).filter((a) => a.cwd && under(a.cwd, w.path)),
       issues: linked(`${pr?.body ?? ""}\n${(d.designText ?? "").split("\n").filter((l) => /\b(issue|closes|fixes|resolves|from|parked|deferred)\b/i.test(l)).join("\n")}`), // design prose mentions many #n; only issue-talking lines count
       at: input.ages?.[w.path] ?? 0,
     };
@@ -118,7 +118,7 @@ export function takenIssues(ts) {
 // /forge:shelve); otherwise fix/<slug> for a labelled bug, else feat/<slug>. The skill mirrors this.
 export function branchFor(issue, title) {
   const m = /Branch: `([^`\s]+)`/.exec(issue?.body ?? "");
-  if (m) return m[1];
+  if (m && /^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(m[1])) return m[1];
   const slug = slugify(issue?.title ?? title) || (issue?.number ? `issue-${issue.number}` : "work"); // a non-Latin title slugifies to ""
   return `${kind(issue ?? {}) === "bug" ? "fix" : "feat"}/${slug}`;
 }

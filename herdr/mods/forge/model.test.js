@@ -54,10 +54,10 @@ function input(over = {}) {
   };
 }
 
-test("tracks: one per non-main worktree with a branch; stage, group, issues, progress", () => {
+test("tracks: one per non-main worktree; stage, group, issues, progress", () => {
   const ts = tracks(input());
-  assert.equal(ts.length, 1);
-  const t = ts[0];
+  assert.equal(ts.length, 2);
+  const t = ts.find((x) => x.branch === "feat/ring");
   assert.equal(t.branch, "feat/ring");
   assert.equal(t.slug, "ring");
   assert.equal(t.pr.number, 55);
@@ -68,8 +68,28 @@ test("tracks: one per non-main worktree with a branch; stage, group, issues, pro
   assert.equal(t.at, 1000);
 });
 
+test("a detached worktree is still a track, named by its folder, with no PR", () => {
+  const d = tracks(input()).find((x) => x.path === "/h/.herdr/worktrees/r/fix-login");
+  assert.equal(d.slug, "fix-login"); assert.equal(d.branch, "(detached)"); assert.equal(d.pr, null);
+  const blocked = tracks(input({ agents: [{ address: "t9", status: "blocked", cwd: "/h/.herdr/worktrees/r/fix-login" }] })).find((x) => x.slug === "fix-login");
+  assert.equal(blocked.group, "needs");
+});
+
+test("tracks tolerates missing prs and agents", () => {
+  assert.equal(tracks({ worktrees: parseWorktrees(WT), docs: {} }).length, 2);
+});
+
+test("uppercase [X] counts as ticked", () => {
+  assert.deepEqual(progress("- [X] T1 — a\n- [ ] T2 — b\n"), { done: 1, total: 2 });
+  assert.equal(planTasks("## Task 1\n**A**\n", "- [X] T1 — A\n")[0].done, true);
+});
+
+test("a draft PR with no docs is still Build", () => {
+  assert.equal(STAGES[tracks(input({ docs: {} })).find((x) => x.branch === "feat/ring").stage], "Build");
+});
+
 test("a CLOSED PR (shelved) does not count", () => {
-  const t = tracks(input({ prs: [{ ...input().prs[0], state: "CLOSED" }] }))[0];
+  const t = tracks(input({ prs: [{ ...input().prs[0], state: "CLOSED" }] })).find((x) => x.branch === "feat/ring");
   assert.equal(t.pr, null); assert.equal(STAGES[t.stage], "Plan");
 });
 
@@ -109,6 +129,7 @@ test("branchFor: a shelved issue resumes its recorded branch; a bug gets fix/, e
   assert.equal(branchFor({ title: "Shelved: ring", labels: [{ name: "shelved" }], body: "Shelved from track `ring` at Plan.\nBranch: `feat/ring` (pushed)." }), "feat/ring");
   assert.equal(branchFor({ title: "Login 500s", labels: [{ name: "bug" }], body: "" }), "fix/login-500s");
   assert.equal(branchFor({ title: "Ring: which bus?", labels: [], body: "" }), "feat/ring-which-bus");
+  assert.equal(branchFor({ title: "Odd", labels: [], body: "Branch: `--detach`" }), "feat/odd");
   assert.equal(branchFor(null, "  Shelve a track  "), "feat/shelve-a-track");
   assert.equal(branchFor({ number: 7, title: "日本語", labels: [], body: "" }), "feat/issue-7");
 });
