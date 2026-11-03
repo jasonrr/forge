@@ -1,6 +1,7 @@
 ---
 name: start
-description: The one way to begin work — on an issue (`/forge:start #42`) or a one-line brief. Reads what it is given and routes to /forge:debug, /forge:brainstorm, /forge:plan or /forge:build; resumes a shelved branch. Used by the Herdr work panel's Start work; also fine from a shell.
+description: >-
+  The one way to begin work — on an issue (`/forge:start #42`) or a one-line brief. Reads what it is given and routes to /forge:debug, /forge:brainstorm, /forge:plan or /forge:build; resumes a shelved branch. Used by the Herdr work panel's Start work; also fine from a shell.
 ---
 
 # Start
