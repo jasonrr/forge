@@ -6,11 +6,13 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
 import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, hc, layout, setShared, shared } from "herdr";
 import { writeFile, mkdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app (AGENTS.md "Other built-ins")
-import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, agentsOn, grouped, takenIssues, isParked, branchFor, shelfBranch, DONE_WINDOW_MS } from "./model.js";
+import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, agentsOn, grouped, takenIssues, isParked, branchFor, shelfBranch, DONE_WINDOW_MS, slimPr } from "./model.js";
 const DONE_SUFFIX = ` · ${DONE_WINDOW_MS / 86400000} DAYS`;
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
-const GH_EVERY = 30000; // gh is called at most this often per view (GraphQL budget: 5000 pts/h per user; one refresh ≈ 1 pt per 100 PRs or issues)
+const PR_FIELDS = "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author";
+const GH_TTL = 60000; // gh results are cached across all forge views for this long (shared()); GraphQL budget: 5000 pts/h per user
+const DAY = 86400000;
 const RAIL = 44; // the folded width; the sidebar mod uses 44 too (76 on macOS only because of the traffic lights, which this panel never sits under)
 const MONO = (el) => el.font_family(settings().font_family); // the terminal's mono font (AGENTS.md: settings().font_family)
 const ago = (sec) => { const d = Math.max(0, Date.now() / 1000 - sec); return d < 3600 ? `${Math.floor(d / 60)}m` : d < 86400 ? `${Math.floor(d / 3600)}h` : `${Math.floor(d / 86400)}d`; };
@@ -28,11 +30,11 @@ function location() {
   return { cwd: pane?.cwd || f?.cwd || sibling?.cwd || space?.folder, space: space?.id, machine: space?.machine ?? null };
 }
 
-const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, ahead: {}, me: null, repoUrl: null });
+const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, ahead: {}, me: null, repoUrl: null, nwo: null });
 
 export default class Forge extends View {
   init(_p, cx) {
-    this.root = props()?.root ?? null; this.on = props()?.on ?? null; this.ghAt = 0; this.ghRoot = null; this.ghOn = null; this.ghErr = null; this.refreshing = false; this.base = "origin/main";
+    this.root = props()?.root ?? null; this.on = props()?.on ?? null; this.issuesAt = 0; this.refreshing = false; this.base = "origin/main";
     this.data = emptyData(); this.seq = 0; this.watchGen = 0; this.watched = "";
     this.w = 0; this.onSize = (size, cx) => { if (Math.abs((this.w ?? 0) - size.width) >= 1) { this.w = size.width; cx.notify(); } }; // container width: the views branch on narrow()
     this.filter = "all"; this.shown = 50; this.error = null; this.msgs = {}; this.polling = false; // each view is its own copy of the mod, so these never collide
@@ -41,7 +43,7 @@ export default class Forge extends View {
     if (props()?.view === "start") this.initStart(cx);
     if (props()?.track) this.initDetail(cx);
     this.refresh(cx);
-    cx.timer.every(GH_EVERY, (cx) => { if (!this.refreshing) this.refresh(cx); }); // the folder watch covers files, agents() re-renders by itself
+    cx.timer.every(GH_TTL, (cx) => { if (!this.refreshing) this.refresh(cx); }); // the folder watch covers files, agents() re-renders by itself
     cx.timer.every(5000, (cx) => { this.relocate(cx); cx.spawn((cx) => this.pollMsgs(cx)); }); // the sidebar follows the shown space; agent messages live in herdr-core, not agents()
   }
 
@@ -49,6 +51,19 @@ export default class Forge extends View {
   // failed: exec REJECTED (no cwd, no program, machine unreachable) — not the same as git exiting non-zero ("not a repo").
   async git(args, cwd = this.root, on = this.on) { try { const r = await exec("git", [...GIT, ...args], { cwd, on }); return { ok: r.code === 0, out: (r.stdout ?? "").replace(/\n+$/, "") }; } catch { return { ok: false, out: "", failed: true }; } }
   async gh(args, cwd = this.root, on = this.on) { try { const r = await exec("gh", args, { cwd, on }); return r.code === 0 ? JSON.parse(r.stdout || "[]") : null; } catch { return null; } }
+  // One cache for every forge view (shared(): persisted in shared.json; setShared re-renders every mod copy). Fresh → no call.
+  // The 1 s slack keeps a timer that fires every ttl from always landing just inside the window (it would double the real interval).
+  // Stores map(data) so big payloads are slimmed first. A failed call returns the last good data (stale beats empty), else null.
+  // ponytail: two views expiring together both fetch once; harmless at this rate.
+  async cachedGh(key, args, cwd, on, ttl = GH_TTL, map = (x) => x) {
+    const k = `forge.gh.${key}`, hit = shared(k);
+    if (hit && Date.now() - hit.at < ttl - 1000) return hit.data;
+    const data = await this.gh(args, cwd, on);
+    if (data === null) return hit?.data ?? null;
+    const v = map(data);
+    setShared(k, { at: Date.now(), data: v });
+    return v;
+  }
 
   // Cheap: one git call, and a full refresh only when the shown repo (machine + path) changed. Only refresh() changes this.on.
   relocate(cx) {
@@ -59,8 +74,8 @@ export default class Forge extends View {
     if (machine !== this.on) { this.refresh(cx); return; } // another machine: always another repo
     cx.spawn(async (cx) => { const r = await this.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd, machine); if (r.ok && r.out.replace(/\/\.git$/, "") !== this.root) this.refresh(cx); });
   }
-  // Every data reset also forgets the gh cache: an emptied list must never pass for a fresh fetch.
-  resetData() { this.data = emptyData(); this.ghAt = 0; this.fetched = 0; }
+  // Every data reset also forgets the issues cache: an emptied list must never pass for a fresh fetch.
+  resetData() { this.data = emptyData(); this.issuesAt = 0; this.fetched = 0; }
   refresh(cx) {
     cx.spawn(async (cx) => {
       const seq = ++this.seq; // a newer refresh (or a repo change) supersedes this one: it must not write its data
@@ -80,48 +95,59 @@ export default class Forge extends View {
           if (r0 !== this.root) { this.root = r0; this.resetData(); } // another repo's PRs, issues and url must never show
         }
         const root = this.root, on = this.on; // captured: after the first await below, never read this.root / this.on again (the sidebar branch read this.root after its await, safely: only refresh() writes these and each refresh bumps seq)
-        const git = (args, cwd = root) => this.git(args, cwd, on);
-        const base = (await git(["rev-parse", "--verify", "-q", "origin/main"])).ok ? "origin/main" : "main";
-        const list = await git(["worktree", "list", "--porcelain"]);
-        if (seq !== this.seq) return;
-        if (!list.ok) { this.error = list.failed ? (on ? `can't reach ${on} — showing the last data` : "can't run git — showing the last data") : "git worktree list failed — showing the last data"; cx.notify(); return; } // never replace tracks with an empty list
-        const wt = parseWorktrees(list.out);
-        this.watch([`${root}/docs`, ...wt.filter((w) => !w.main).map((w) => `${w.path}/docs`)], cx, on);
-        const docs = {}, ages = {}, ahead = {};
-        const one = async (w) => {
-          const changed = await git(["diff", "--name-only", `${base}...HEAD`, "--", "docs/decisions", "docs/plans"], w.path);
-          const untracked = await git(["ls-files", "--others", "--exclude-standard", "docs/decisions", "docs/plans"], w.path);
-          if (changed.failed || untracked.failed) { const d = this.data; if (d.docs[w.path]) { docs[w.path] = d.docs[w.path]; ages[w.path] = d.ages[w.path] ?? 0; ahead[w.path] = d.ahead[w.path] ?? 0; } return; } // an exec that could not run is not "no docs": keep what we had
-          const files = `${changed.out}\n${untracked.out}`.split("\n").filter(Boolean);
-          const design = files.find((f) => f.startsWith("docs/decisions/")) ?? null, plan = files.find((f) => f.startsWith("docs/plans/")) ?? null;
-          const designText = design ? (await readTextFile(`${w.path}/${design}`, { on }).catch(() => "")) ?? "" : "";
-          // (a pruned worktree never gets here: parseWorktrees drops `prunable` blocks)
-          docs[w.path] = { design, plan, designText };
-          ages[w.path] = Number((await git(["log", "-1", "--format=%ct"], w.path)).out) || 0;
-          ahead[w.path] = Number((await git(["rev-list", "--count", `${base}..HEAD`], w.path)).out) || 0;
-        };
-        const ws = wt.filter((w) => !w.main);
-        if (on) { for (const w of ws) await one(w); } else await Promise.all(ws.map(one)); // ponytail: sequential on a remote — hc runs at most 16 execs per machine and every open view refreshes on its own
-        // ponytail: per-view throttle — docs/ bursts (builds, rebases) reuse the cached lists; one shared cache across views if several open panels ever matter
-        const ghFresh = this.ghRoot === root && this.ghOn === on && Date.now() - this.ghAt < GH_EVERY - 1000;
-        const [prs, issues] = ghFresh ? [this.data.prs, this.data.issues] : await Promise.all([
-          this.gh(["pr", "list", "--state", "all", "--limit", "200", "--json", "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author"], root, on),
-          this.gh(["issue", "list", "--state", "open", "--limit", "500", "--json", "number,title,body,url,labels,author,createdAt"], root, on),
-        ]);
-        const me = this.data.me || (await exec("gh", ["api", "user", "-q", ".login"], { cwd: root, on }).catch(() => ({}))).stdout?.trim() || null; // || not ??: an empty string must retry next time
-        const repoUrl = this.data.repoUrl || (await exec("gh", ["repo", "view", "--json", "url", "-q", ".url"], { cwd: root, on }).catch(() => ({}))).stdout?.trim() || null;
+        const r = await this.loadRepo(root, on, this.data);
         if (seq !== this.seq || root !== this.root || on !== this.on) return;
-        this.base = base; this.data = { worktrees: wt, docs, prs: prs ?? this.data.prs, issues: issues ?? this.data.issues, ages, ahead, me, repoUrl };
-        if (!ghFresh) { this.ghAt = Date.now(); this.ghRoot = root; this.ghOn = on; this.ghErr = prs ? null : "gh unavailable — PRs and issues may be stale"; }
-        this.error = this.ghErr; // replaces a "can't reach" from an earlier tick; a cached gh failure stays shown
+        if (!r.ok) { this.error = r.error; cx.notify(); return; } // never replace tracks with an empty list
+        this.watch([`${root}/docs`, ...r.worktrees.filter((w) => !w.main).map((w) => `${w.path}/docs`)], cx, on);
+        let issues = this.data.issues;
+        if (this.needIssues() && Date.now() - this.issuesAt >= GH_TTL - 1000) { // the 500-issue list stays per view and only where it is shown: too big for shared.json
+          const got = await this.gh(["issue", "list", "--state", "open", "--limit", "500", "--json", "number,title,body,url,labels,author,createdAt"], root, on);
+          if (seq !== this.seq) return;
+          if (got) { issues = got; this.issuesAt = Date.now(); }
+        }
+        const me = await this.cachedGh(`me:${on ?? ""}`, ["api", "user"], root, on, DAY, (u) => u.login);
+        if (seq !== this.seq) return;
+        this.base = r.base;
+        this.data = { worktrees: r.worktrees, docs: r.docs, prs: r.prs ?? this.data.prs, issues, ages: r.ages, ahead: r.ahead, me, repoUrl: r.repoUrl, nwo: r.nwo };
+        this.error = r.prs ? null : "gh unavailable — PRs may be stale";
         this.fetched = Date.now();
         if (props()?.track) this.loadDoc(cx, !!this.on); // the detail pane's first load: track() is null until this data exists; remote: re-read every tick (no folder watch)
         cx.notify();
       } finally { if (seq === this.seq) this.refreshing = false; } // a superseded refresh must not clear the newer one's flag
     });
   }
+  // One repo's data, no this.* writes and no seq: the caller (refresh, Home) checks staleness. `prev` supplies keep-what-we-had values; always pass `on` (this.git's defaults are wrong for Home).
+  async loadRepo(root, on, prev = emptyData()) {
+    const git = (args, cwd = root) => this.git(args, cwd, on);
+    const base = (await git(["rev-parse", "--verify", "-q", "origin/main"])).ok ? "origin/main" : "main";
+    const list = await git(["worktree", "list", "--porcelain"]);
+    if (!list.ok) return { ok: false, error: list.failed ? (on ? `can't reach ${on} — showing the last data` : "can't run git — showing the last data") : "git worktree list failed — showing the last data" }; // never replace tracks with an empty list
+    const wt = parseWorktrees(list.out);
+    const docs = {}, ages = {}, ahead = {};
+    const one = async (w) => {
+      const changed = await git(["diff", "--name-only", `${base}...HEAD`, "--", "docs/decisions", "docs/plans"], w.path);
+      const untracked = await git(["ls-files", "--others", "--exclude-standard", "docs/decisions", "docs/plans"], w.path);
+      if (changed.failed || untracked.failed) { if (prev.docs[w.path]) { docs[w.path] = prev.docs[w.path]; ages[w.path] = prev.ages[w.path] ?? 0; ahead[w.path] = prev.ahead[w.path] ?? 0; } return; } // an exec that could not run is not "no docs": keep what we had
+      const files = `${changed.out}\n${untracked.out}`.split("\n").filter(Boolean);
+      const design = files.find((f) => f.startsWith("docs/decisions/")) ?? null, plan = files.find((f) => f.startsWith("docs/plans/")) ?? null;
+      const designText = design ? (await readTextFile(`${w.path}/${design}`, { on }).catch(() => "")) ?? "" : "";
+      // (a pruned worktree never gets here: parseWorktrees drops `prunable` blocks)
+      docs[w.path] = { design, plan, designText };
+      ages[w.path] = Number((await git(["log", "-1", "--format=%ct"], w.path)).out) || 0;
+      ahead[w.path] = Number((await git(["rev-list", "--count", `${base}..HEAD`], w.path)).out) || 0;
+    };
+    const ws = wt.filter((w) => !w.main);
+    if (on) { for (const w of ws) await one(w); } else await Promise.all(ws.map(one)); // ponytail: sequential on a remote — hc runs at most 16 execs per machine and every open view refreshes on its own
+    const key = `${on ?? ""}:${root}`, pl = (state, limit) => ["pr", "list", "--state", state, "--limit", String(limit), "--json", PR_FIELDS];
+    const open = await this.cachedGh(`pr-open:${key}`, pl("open", 100), root, on, GH_TTL, (ps) => ps.map(slimPr));
+    const done = await this.cachedGh(`pr-merged:${key}`, pl("merged", 30), root, on, GH_TTL, (ps) => ps.map(slimPr)); // sequential: remote exec rule
+    const id = await this.cachedGh(`repo:${key}`, ["repo", "view", "--json", "url,nameWithOwner"], root, on, DAY);
+    const prs = open && done ? [...open, ...done] : null; // tracks() ignores CLOSED; an OPEN PR on a reused branch still wins (model.js)
+    return { ok: true, base, worktrees: wt, docs, ages, ahead, prs, repoUrl: id?.url ?? prev.repoUrl ?? null, nwo: id?.nameWithOwner ?? prev.nwo ?? null }; // a failed lookup keeps the previous identity
+  }
+  needIssues() { const v = props()?.view; return v === "backlog" || v === "start"; }
   // One loop per docs/ dir (main root + each linked worktree); the set restarts only when the path list changes. A missing dir rejects: wait and retry while the set is current.
-  // watchFolder is this computer only: a remote root watches nothing and the GH_EVERY refresh picks up its docs. An empty set still ends the old loops.
+  // watchFolder is this computer only: a remote root watches nothing and the GH_TTL refresh picks up its docs. An empty set still ends the old loops.
   watch(paths, cx, on) {
     if (on) paths = [];
     const key = paths.join("\n"); if (key === this.watched) return;
@@ -356,7 +382,7 @@ export default class Forge extends View {
   }
   initDetail(cx) {
     this.tab = "design"; this.docs = {}; this.editing = false; this.editor = null; this.saveMsg = null; this.log = []; this.reloading = false;
-    cx.spawn(async (cx) => { if (this.on) return; // a remote track: refresh() (GH_EVERY timer) reloads it
+    cx.spawn(async (cx) => { if (this.on) return; // a remote track: refresh() (GH_TTL timer) reloads it
       for (;;) {
       try { await watchFolder(`${props().track}/docs`); } catch { if (this.data.worktrees.length && !this.track()) return; await cx.sleep(5000); continue; }
       if (!this.editing) { this.docs = {}; this.loadDoc(cx); }
