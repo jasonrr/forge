@@ -105,7 +105,7 @@ export default class Forge extends View {
           if (seq !== this.seq) return;
           if (got) { issues = got; this.issuesAt = Date.now(); }
         }
-        const me = await this.cachedGh(`me:${on ?? ""}`, ["api", "user"], root, on, DAY, (u) => u.login);
+        const me = (await this.cachedGh(`me:${on ?? ""}`, ["api", "user"], root, on, DAY, (u) => u.login)) ?? this.data.me; // a failed lookup keeps a known login
         if (seq !== this.seq) return;
         this.base = r.base;
         this.data = { worktrees: r.worktrees, docs: r.docs, prs: r.prs ?? this.data.prs, issues, ages: r.ages, ahead: r.ahead, me, repoUrl: r.repoUrl, nwo: r.nwo };
@@ -140,7 +140,7 @@ export default class Forge extends View {
     if (on) { for (const w of ws) await one(w); } else await Promise.all(ws.map(one)); // ponytail: sequential on a remote — hc runs at most 16 execs per machine and every open view refreshes on its own
     const key = `${on ?? ""}:${root}`, pl = (state, limit) => ["pr", "list", "--state", state, "--limit", String(limit), "--json", PR_FIELDS];
     const open = await this.cachedGh(`pr-open:${key}`, pl("open", 100), root, on, GH_TTL, (ps) => ps.map(slimPr));
-    const done = await this.cachedGh(`pr-merged:${key}`, pl("merged", 30), root, on, GH_TTL, (ps) => ps.map(slimPr)); // sequential: remote exec rule
+    const done = await this.cachedGh(`pr-merged:${key}`, [...pl("merged", 30), "--author", "@me"], root, on, GH_TTL, (ps) => ps.map(slimPr)); // sequential: remote exec rule
     const id = await this.cachedGh(`repo:${key}`, ["repo", "view", "--json", "url,nameWithOwner"], root, on, DAY);
     const prs = open && done ? [...open, ...done] : null; // tracks() ignores CLOSED; an OPEN PR on a reused branch still wins (model.js)
     return { ok: true, base, worktrees: wt, docs, ages, ahead, prs, repoUrl: id?.url ?? prev.repoUrl ?? null, nwo: id?.nameWithOwner ?? prev.nwo ?? null }; // a failed lookup keeps the previous identity
