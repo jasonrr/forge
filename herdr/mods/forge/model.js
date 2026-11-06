@@ -159,3 +159,53 @@ export function branchFor(issue, title) {
 export function isParked(issue) {
   return /^\[p\d\]/.test(issue.title ?? "") || /\b(From (PR|review)|Filed from|Parked|Deferred from)\b/.test(issue.body ?? "");
 }
+
+// The shared gh cache persists to shared.json on every write: keep only the body lines the panel reads —
+// checklist boxes (progress, planTasks ticks) and lines with #refs (linked issues). The PR tab fetches the full body on demand (Task 4).
+export function slimPr(p) {
+  const body = (p.body ?? "").split("\n").filter((l) => /^\s*- \[[ xX]\]|#\d+/.test(l)).join("\n");
+  return { ...p, body };
+}
+
+// The deepest linked (non-main) worktree whose folder holds cwd, or null.
+export function trackFor(worktrees, cwd) {
+  if (!cwd) return null;
+  const hits = worktrees.filter((w) => !w.main && under(cwd, w.path)).sort((a, b) => b.path.length - a.path.length);
+  return hits[0]?.path ?? null;
+}
+
+export const HOME_GROUPS = [["needs", "Waiting on you"], ["flight", "In flight"], ["planned", "Planned"], ["done", "Done"]];
+// Home across repos. repos: [{root, on, nwo, tracks, drafts?}] with tracks from tracks(). assigned/shelved: `gh search issues` rows
+// ({repository:{name,nameWithOwner}, number, title, url, labels, createdAt}). merged: `gh search prs --merged-at` rows
+// ({repository, number, title, url, closedAt}; search has no mergedAt, and closedAt is the merge time for a merged PR).
+export function homeGroups({ repos = [], assigned = [], shelved = [], merged = [], now = Date.now() }) {
+  const items = { needs: [], flight: [], planned: [], done: [] };
+  const taken = new Set(), seenPr = new Set(), byNwo = new Map(repos.filter((r) => r.nwo).map((r) => [r.nwo, r]));
+  for (const r of repos) {
+    const repo = r.root.split("/").pop();
+    for (const t of r.tracks) {
+      items[t.group === "hold" ? "flight" : t.group].push({ ...t, repo, root: r.root, on: r.on ?? null });
+      if (t.pr?.url) seenPr.add(t.pr.url);
+      if (!t.merged && r.nwo) for (const n of t.issues) taken.add(`${r.nwo}#${n}`);
+    }
+  }
+  const seen = new Set();
+  for (const [i, shelf] of [...shelved.map((i) => [i, true]), ...assigned.map((i) => [i, false])]) {
+    const nwo = i.repository?.nameWithOwner, key = `${nwo}#${i.number}`;
+    if (seen.has(key) || taken.has(key)) continue;
+    seen.add(key);
+    const r = byNwo.get(nwo);
+    items.planned.push({ issue: i, shelved: shelf, repo: i.repository?.name ?? nwo, root: r?.root ?? null, on: r?.on ?? null, at: Date.parse(i.createdAt) / 1000 || 0 });
+  }
+  for (const p of merged) {
+    const ms = Date.parse(p.closedAt);
+    if (seenPr.has(p.url) || !(now - ms <= DONE_WINDOW_MS)) continue;
+    items.done.push({ path: null, branch: null, pr: { ...p, state: "MERGED", mergedAt: p.closedAt }, repo: p.repository?.name ?? "", root: byNwo.get(p.repository?.nameWithOwner)?.root ?? null, on: null, agents: [], issues: [], at: ms / 1000, merged: true, group: "done" });
+  }
+  const rank = (it) => (it.group === "flight" ? 0 : 2); // agent-backed before no-agent (Task 8 adds drafts at rank 1)
+  items.flight.sort((a, b) => rank(a) - rank(b) || (rank(a) === 0 ? b.at - a.at : rank(a) === 2 ? a.at - b.at : 0));
+  items.needs.sort((a, b) => b.at - a.at);
+  items.planned.sort((a, b) => (b.shelved - a.shelved) || b.at - a.at); // shelved first, then newest
+  items.done.sort((a, b) => b.at - a.at);
+  return HOME_GROUPS.map(([key, title]) => ({ key, title, items: items[key] }));
+}

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, grouped, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS } from "./model.js";
+import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, grouped, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS, slimPr, trackFor, HOME_GROUPS, homeGroups } from "./model.js";
 
 const WT = "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\nworktree /r/.claude/worktrees/ring\nHEAD bbb\nbranch refs/heads/feat/ring\n\nworktree /h/.herdr/worktrees/r/fix-login\nHEAD ccc\ndetached\n\nworktree /gone\nHEAD ddd\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n";
 
@@ -219,4 +219,45 @@ test("agentsOn: only that machine's agents; an unknown space is nobody's", () =>
   assert.deepEqual(agentsOn(ag, sp, null).map((a) => a.address), ["t1"]);
   assert.deepEqual(agentsOn(ag, sp, "mbp").map((a) => a.address), ["mbp/t2"]);
   assert.deepEqual(agentsOn(ag, sp, undefined).map((a) => a.address), ["t1"]);
+});
+
+test("slimPr keeps only checklist and #ref lines of the body", () => {
+  const p = { number: 1, headRefName: "feat/a", body: "Intro text\n- [x] T1 one\n- [ ] T2 two\nCloses #12\nlong prose\n" };
+  assert.deepEqual(slimPr(p), { number: 1, headRefName: "feat/a", body: "- [x] T1 one\n- [ ] T2 two\nCloses #12" });
+  assert.equal(slimPr({ number: 2, body: null }).body, "");
+});
+
+test("trackFor returns the deepest linked worktree containing cwd, never main", () => {
+  const wt = [{ path: "/r", branch: "main", main: true }, { path: "/w/feat-a", branch: "feat/a", main: false }, { path: "/w/feat-ab", branch: "feat/ab", main: false }, { path: "/w/feat-a/nested", branch: "feat/n", main: false }];
+  assert.equal(trackFor(wt, "/w/feat-a"), "/w/feat-a");
+  assert.equal(trackFor(wt, "/w/feat-a/src/x"), "/w/feat-a");
+  assert.equal(trackFor(wt, "/w/feat-a/nested/y"), "/w/feat-a/nested");
+  assert.equal(trackFor(wt, "/w/feat-ab"), "/w/feat-ab");
+  assert.equal(trackFor(wt, "/r"), null);
+  assert.equal(trackFor(wt, null), null);
+});
+
+test("homeGroups: needs/flight from tracks, hold folds into flight, planned minus taken, done deduped", () => {
+  const now = Date.parse("2026-11-06T12:00:00Z");
+  const t = (over) => ({ path: "/w/x", branch: "feat/x", slug: "x", pr: null, agents: [], issues: [], at: 100, merged: false, group: "hold", ...over });
+  const repos = [{ root: "/code/forge", on: null, nwo: "o/forge", tracks: [
+    t({ path: "/w/a", group: "needs", issues: [5] }),
+    t({ path: "/w/b", group: "flight", at: 300 }),
+    t({ path: "/w/c", group: "hold", at: 200 }),
+    t({ path: "/w/d", group: "done", merged: true, pr: { url: "u/9", number: 9 }, at: now / 1000 - 3600 }),
+  ] }];
+  const issue = (n, nwo = "o/forge") => ({ repository: { name: nwo.split("/")[1], nameWithOwner: nwo }, number: n, title: `i${n}`, url: `i/${n}`, labels: [], createdAt: "2026-11-01T00:00:00Z" });
+  const g = homeGroups({ repos, now,
+    assigned: [issue(5), issue(6), issue(7, "o/elsewhere")],
+    shelved: [issue(6)],
+    merged: [{ repository: { name: "forge", nameWithOwner: "o/forge" }, number: 9, title: "dup", url: "u/9", closedAt: "2026-11-06T10:00:00Z" },
+             { repository: { name: "forge", nameWithOwner: "o/forge" }, number: 8, title: "new", url: "u/8", closedAt: "2026-11-05T10:00:00Z" },
+             { repository: { name: "forge", nameWithOwner: "o/forge" }, number: 7, title: "old", url: "u/7", closedAt: "2026-10-01T10:00:00Z" }] });
+  assert.deepEqual(g.map((x) => x.key), HOME_GROUPS.map(([k]) => k));
+  const by = Object.fromEntries(g.map((x) => [x.key, x.items]));
+  assert.deepEqual(by.needs.map((i) => i.path), ["/w/a"]);
+  assert.deepEqual(by.flight.map((i) => i.path), ["/w/b", "/w/c"]); // agent-backed first, then no-agent oldest first
+  assert.deepEqual(by.planned.map((i) => [i.issue.number, i.shelved, i.root]), [[6, true, "/code/forge"], [7, false, null]]); // #5 is taken by /w/a; #6 once, as shelved
+  assert.deepEqual(by.done.map((i) => i.pr.number), [9, 8]); // #9 from the track (not duplicated), #8 from search, #7 outside the window
+  assert.equal(by.needs[0].repo, "forge");
 });
