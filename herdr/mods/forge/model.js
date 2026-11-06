@@ -180,7 +180,7 @@ export const HOME_GROUPS = [["needs", "Waiting on you"], ["flight", "In flight"]
 // ({repository, number, title, url, closedAt}; search has no mergedAt, and closedAt is the merge time for a merged PR).
 export function homeGroups({ repos = [], assigned = [], shelved = [], merged = [], now = Date.now() }) {
   const items = { needs: [], flight: [], planned: [], done: [] };
-  const taken = new Set(), seenPr = new Set(), byNwo = new Map(repos.filter((r) => r.nwo).map((r) => [r.nwo, r]));
+  const taken = new Set(), seenPr = new Set(), byNwo = new Map(repos.filter((r) => r.nwo).sort((a, b) => (a.on == null) - (b.on == null)).map((r) => [r.nwo, r])); // a repo on this computer wins over a same-nwo remote one: Map keeps the last, so sort it last
   for (const r of repos) {
     const repo = r.root.split("/").pop();
     for (const t of r.tracks) {

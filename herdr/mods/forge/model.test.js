@@ -261,3 +261,12 @@ test("homeGroups: needs/flight from tracks, hold folds into flight, planned minu
   assert.deepEqual(by.done.map((i) => i.pr.number), [9, 8]); // #9 from the track (not duplicated), #8 from search, #7 outside the window
   assert.equal(by.needs[0].repo, "forge");
 });
+
+test("homeGroups: two repos sharing an nwo resolve to this computer's, in either order", () => {
+  const remote = { root: "/r", on: "mbp", nwo: "o/x", tracks: [] }, local = { root: "/l", on: null, nwo: "o/x", tracks: [] };
+  const issue = { repository: { name: "x", nameWithOwner: "o/x" }, number: 1, title: "t", url: "u", labels: [], createdAt: "2026-11-01T00:00:00Z" };
+  for (const repos of [[remote, local], [local, remote]]) {
+    const [p] = homeGroups({ repos, assigned: [issue] }).find((g) => g.key === "planned").items;
+    assert.deepEqual([p.root, p.on], ["/l", null]);
+  }
+});
