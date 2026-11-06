@@ -33,3 +33,13 @@
 - hc exec --on allows 16 concurrent execs per machine, and each open panel view refreshes on its own timer → never fan out per-worktree execs in parallel on a remote, and treat a rejected exec as "could not run", not as an empty result.
 - `command -v herdr-app` only proves the binary exists; a Mac with no Herdr window fails every herdr-app call with exit 2 → gate desktop-app steps on `herdr-app status`.
 - The forge repo is public: a manual check run on a private repo must be written up generically (the auto-mode classifier blocked a PR body naming private branches).
+
+## forge-home (PR #29, 2026-11-06)
+
+- `herdr-app check` and `herdr-app status` both pass a mod whose render throws a ReferenceError (a missing import) → only a live render (open the view, take a shot) proves a main.js change; brief implementers to grep every model call against the import line.
+- A mounted mod copy keeps old code after a fix even though its error card says "re-renders on the next change" → close and reopen the pane/tab before re-checking.
+- A plan live check that requires clicking inside a mod dialog (choose a mode, type, press Start) has no CLI path: herdr-app do can open the dialog but not click in it → write such checks as a CLI proxy of the same commands, or plan them for the human.
+- The plan routed main-checkout drafts through /forge:start, but start only reads artifacts on the branch it creates, and an untracked draft never reaches that branch → before a plan hands a file path to a skill, read that skill's routing for where it looks; /forge:plan is the only skill that moves main-checkout drafts.
+- A review-fix pass that changes load order (progressive render) can expose state that was only consistent at the end of the old sequence (Done before meBy) → re-review a fix with the question "what was only true after the old last step?"
+- The same GitHub repo checked out on two connected machines doubles every per-repo list Home merges (Done showed each PR twice) → when aggregating across machines, dedupe by GitHub identity (nwo / PR url), not by root path.
+- A per-key TTL cache with no stale-while-revalidate → every view opened after the TTL waits on the full sequential refetch; paint from the last result first, refresh behind it.

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, grouped, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS } from "./model.js";
+import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS, slimPr, trackFor, HOME_GROUPS, homeGroups, drafts, cacheLife, newest, QUIET_CAP } from "./model.js";
 
 const WT = "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\nworktree /r/.claude/worktrees/ring\nHEAD bbb\nbranch refs/heads/feat/ring\n\nworktree /h/.herdr/worktrees/r/fix-login\nHEAD ccc\ndetached\n\nworktree /gone\nHEAD ddd\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n";
 
@@ -100,16 +100,6 @@ test("group: blocked agent wins, then ready PR, then working, then merged, else 
   assert.equal(g({ prs: [{ ...input().prs[0], state: "MERGED" }] }), "done");
   assert.equal(g({ agents: a("idle") }), "hold");
   assert.equal(g({ agents: [{ address: "t9", status: "working", cwd: "/r/.claude/worktrees/ring2" }] }), "hold");
-});
-
-test("grouped: four groups in order; hold oldest first, others newest first", () => {
-  const base = tracks(input())[0];
-  const mk = (over) => ({ ...base, ...over });
-  const g = grouped([mk({ group: "hold", at: 5, path: "a" }), mk({ group: "hold", at: 1, path: "b" }), mk({ group: "flight", at: 1, path: "c" }), mk({ group: "flight", at: 9, path: "d" })]);
-  assert.deepEqual(g.map((x) => x.key), ["needs", "flight", "hold", "done"]);
-  assert.deepEqual(g[2].items.map((x) => x.path), ["b", "a"]);
-  assert.deepEqual(g[1].items.map((x) => x.path), ["d", "c"]);
-  assert.equal(g[0].items.length, 0);
 });
 
 test("branchFor: a shelved issue resumes its recorded branch; a bug gets fix/, else feat/", () => {
@@ -219,4 +209,112 @@ test("agentsOn: only that machine's agents; an unknown space is nobody's", () =>
   assert.deepEqual(agentsOn(ag, sp, null).map((a) => a.address), ["t1"]);
   assert.deepEqual(agentsOn(ag, sp, "mbp").map((a) => a.address), ["mbp/t2"]);
   assert.deepEqual(agentsOn(ag, sp, undefined).map((a) => a.address), ["t1"]);
+});
+
+test("slimPr keeps checklist lines and only the #refs of prose", () => {
+  const p = { number: 1, headRefName: "feat/a", body: "Intro text\n- [x] T1 one\n- [ ] T2 two\nCloses #12, see #7 and abc#9\nlong prose\n" };
+  assert.deepEqual(slimPr(p), { number: 1, headRefName: "feat/a", body: "- [x] T1 one\n- [ ] T2 two\n#12 #7" });
+  assert.equal(slimPr({ number: 2, body: null }).body, "");
+});
+
+test("trackFor returns the deepest linked worktree containing cwd, never main", () => {
+  const wt = [{ path: "/r", branch: "main", main: true }, { path: "/w/feat-a", branch: "feat/a", main: false }, { path: "/w/feat-ab", branch: "feat/ab", main: false }, { path: "/w/feat-a/nested", branch: "feat/n", main: false }];
+  assert.equal(trackFor(wt, "/w/feat-a"), "/w/feat-a");
+  assert.equal(trackFor(wt, "/w/feat-a/src/x"), "/w/feat-a");
+  assert.equal(trackFor(wt, "/w/feat-a/nested/y"), "/w/feat-a/nested");
+  assert.equal(trackFor(wt, "/w/feat-ab"), "/w/feat-ab");
+  assert.equal(trackFor(wt, "/r"), null);
+  assert.equal(trackFor(wt, null), null);
+});
+
+test("homeGroups: needs/flight from tracks, hold folds into flight, planned minus taken, done deduped", () => {
+  const now = Date.parse("2026-11-06T12:00:00Z");
+  const t = (over) => ({ path: "/w/x", branch: "feat/x", slug: "x", pr: null, agents: [], issues: [], at: 100, merged: false, group: "hold", ...over });
+  const repos = [{ root: "/code/forge", on: null, nwo: "o/forge", tracks: [
+    t({ path: "/w/a", group: "needs", issues: [5] }),
+    t({ path: "/w/b", group: "flight", at: 300 }),
+    t({ path: "/w/c", group: "hold", at: 200 }),
+    t({ path: "/w/d", group: "done", merged: true, pr: { url: "u/9", number: 9 }, at: now / 1000 - 3600 }),
+  ] }];
+  const issue = (n, nwo = "o/forge") => ({ repository: { name: nwo.split("/")[1], nameWithOwner: nwo }, number: n, title: `i${n}`, url: `i/${n}`, labels: [], createdAt: "2026-11-01T00:00:00Z" });
+  const g = homeGroups({ repos, now,
+    assigned: [issue(5), issue(6), issue(7, "o/elsewhere")],
+    shelved: [issue(6)],
+    merged: [{ repository: { name: "forge", nameWithOwner: "o/forge" }, number: 9, title: "dup", url: "u/9", closedAt: "2026-11-06T10:00:00Z" },
+             { repository: { name: "forge", nameWithOwner: "o/forge" }, number: 8, title: "new", url: "u/8", closedAt: "2026-11-05T10:00:00Z" },
+             { repository: { name: "forge", nameWithOwner: "o/forge" }, number: 7, title: "old", url: "u/7", closedAt: "2026-10-01T10:00:00Z" }] });
+  assert.deepEqual(g.map((x) => x.key), HOME_GROUPS.map(([k]) => k));
+  const by = Object.fromEntries(g.map((x) => [x.key, x.items]));
+  assert.deepEqual(by.needs.map((i) => i.path), ["/w/a"]);
+  assert.deepEqual(by.flight.map((i) => i.path), ["/w/b", "/w/c"]); // agent-backed first, then no-agent oldest first
+  assert.deepEqual(by.planned.map((i) => [i.issue.number, i.shelved, i.root]), [[6, true, "/code/forge"], [7, false, null]]); // #5 is taken by /w/a; #6 once, as shelved
+  assert.deepEqual(by.done.map((i) => i.pr.number), [9, 8]); // #9 from the track (not duplicated), #8 from search, #7 outside the window
+  assert.equal(by.needs[0].repo, "forge");
+});
+
+test("homeGroups: two repos sharing an nwo resolve to this computer's, in either order", () => {
+  const remote = { root: "/r", on: "mbp", nwo: "o/x", tracks: [] }, local = { root: "/l", on: null, nwo: "o/x", tracks: [] };
+  const issue = { repository: { name: "x", nameWithOwner: "o/x" }, number: 1, title: "t", url: "u", labels: [], createdAt: "2026-11-01T00:00:00Z" };
+  for (const repos of [[remote, local], [local, remote]]) {
+    const [p] = homeGroups({ repos, assigned: [issue] }).find((g) => g.key === "planned").items;
+    assert.deepEqual([p.root, p.on], ["/l", null]);
+  }
+});
+
+test("drafts pairs new design/plan files by slug; ignores modified committed docs", () => {
+  const out = [
+    "?? docs/decisions/2026-11-06-forge-home.md",
+    "?? docs/plans/2026-11-06-forge-home.md",
+    "A  docs/decisions/2026-11-05-other.md",
+    " M docs/decisions/2026-11-01-old.md",
+    "?? docs/plans/notes.txt",
+    "?? docs/decisions/2026-11-06-sub/x.md",
+  ].join("\n");
+  assert.deepEqual(drafts(out), [
+    { slug: "forge-home", design: "docs/decisions/2026-11-06-forge-home.md", plan: "docs/plans/2026-11-06-forge-home.md" },
+    { slug: "other", design: "docs/decisions/2026-11-05-other.md", plan: null },
+  ]);
+  assert.deepEqual(drafts(""), []);
+});
+
+test("homeGroups puts drafts in flight between agent-backed and no-agent tracks", () => {
+  const t = (over) => ({ path: "/w/x", branch: "feat/x", slug: "x", pr: null, agents: [], issues: [], at: 100, merged: false, group: "hold", ...over });
+  const g = homeGroups({ repos: [{ root: "/code/forge", on: null, nwo: "o/forge", tracks: [t({ path: "/w/h", group: "hold" }), t({ path: "/w/f", group: "flight" })],
+    drafts: [{ slug: "forge-home", design: "docs/decisions/2026-11-06-forge-home.md", plan: null }] }] });
+  const flight = g.find((x) => x.key === "flight").items;
+  assert.deepEqual(flight.map((i) => i.path ?? `draft:${i.slug}`), ["/w/f", "draft:forge-home", "/w/h"]);
+  assert.equal(flight[1].draft, true);
+  assert.equal(flight[1].root, "/code/forge");
+});
+
+test("homeGroups: a PR-only Done track from two machines' copies of one repo shows once, the local copy's", () => {
+  const t = { path: null, branch: null, slug: null, pr: { url: "u/5", number: 5 }, agents: [], issues: [], at: 100, merged: true, group: "done" };
+  for (const order of [["mbp", null], [null, "mbp"]]) {
+    const repos = order.map((on) => ({ root: "/code/x", on, nwo: "o/x", tracks: [{ ...t }] }));
+    const done = homeGroups({ repos }).find((g) => g.key === "done").items;
+    assert.deepEqual(done.map((i) => [i.pr.number, i.on]), [[5, null]]);
+  }
+});
+
+test("homeGroups: a merged PR with a worktree on one machine beats the other machine's PR-only copy", () => {
+  const prOnly = { path: null, branch: null, slug: null, pr: { url: "u/5", number: 5 }, agents: [], issues: [], at: 100, merged: true, group: "done" };
+  const withWt = { ...prOnly, path: "/w/x-5", branch: "fix/x" };
+  const repos = [{ root: "/code/x", on: null, nwo: "o/x", tracks: [prOnly] }, { root: "/code/x", on: "mbp", nwo: "o/x", tracks: [withWt] }];
+  const done = homeGroups({ repos }).find((g) => g.key === "done").items;
+  assert.deepEqual(done.map((i) => [i.pr.number, i.on, i.path]), [[5, "mbp", "/w/x-5"]]);
+});
+
+test("cacheLife stretches with quiet time, capped, never below the base ttl", () => {
+  const m = 60000, h = 60 * m;
+  assert.equal(cacheLife(m, null, 0), m);
+  assert.equal(cacheLife(m, 0, 10 * m), m); // quiet 10 min: still the base
+  assert.equal(cacheLife(m, 0, h), 3 * m);
+  assert.equal(cacheLife(m, 0, 90 * 24 * h), QUIET_CAP);
+  assert.equal(cacheLife(24 * h, 0, 90 * 24 * h), 24 * h); // a day-long ttl is never cut to the cap
+});
+
+test("newest picks the latest timestamp in a gh list, else null", () => {
+  assert.equal(newest([{ updatedAt: "2026-01-01T00:00:00Z" }, { closedAt: "2026-03-01T00:00:00Z" }, { createdAt: "bad" }]), Date.parse("2026-03-01T00:00:00Z"));
+  assert.equal(newest([]), null);
+  assert.equal(newest({ login: "x" }), null);
 });

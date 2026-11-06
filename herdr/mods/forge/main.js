@@ -1,17 +1,17 @@
-// forge: the dev-loop's work, one track per worktree of the shown repo. Four views in one mod,
-// chosen by props(): none = docked sidebar; {view:"board"} work board; {view:"backlog"}; {track}
-// detail; {view:"start", overlay} the Start work dialog. No stored state: everything is derived
+// forge: the dev-loop's work, one track per worktree of the shown repo. Views in one mod, chosen by route() from props():
+// Home {view:"home"}; track pane {view:"track"} or {track}; backlog {view:"backlog"}; Start ({view:"start"} or the mod.open overlay); and the "moved" notice for an old docked block. Stored state: only the track pin (localStorage) and the shared gh cache (shared()); everything else is derived
 // from git worktrees, the docs on each branch, gh PRs/issues and the host's agents.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
-import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, hc, layout, setShared, shared } from "herdr";
-import { writeFile, mkdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app (AGENTS.md "Other built-ins")
-import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, agentsOn, grouped, takenIssues, isParked, branchFor, shelfBranch, DONE_WINDOW_MS } from "./model.js";
-const DONE_SUFFIX = ` · ${DONE_WINDOW_MS / 86400000} DAYS`;
+import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, setShared, shared } from "herdr";
+import { writeFile, mkdir, readdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app, reads under home (AGENTS.md "Other built-ins")
+import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, branchFor, shelfBranch, slimPr, trackFor, homeGroups, drafts, DONE_WINDOW_MS, cacheLife, newest } from "./model.js";
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
-const GH_EVERY = 30000; // gh is called at most this often per view (GraphQL budget: 5000 pts/h per user; one refresh ≈ 1 pt per 100 PRs or issues)
-const RAIL = 44; // the folded width; the sidebar mod uses 44 too (76 on macOS only because of the traffic lights, which this panel never sits under)
+const PR_FIELDS = "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author";
+const GH_TTL = 60000; // gh results are cached across all forge views for this long (shared()); GraphQL budget: 5000 pts/h per user
+const DAY = 86400000;
+const DONE_SUFFIX = ` · ${DONE_WINDOW_MS / DAY} DAYS`;
 const MONO = (el) => el.font_family(settings().font_family); // the terminal's mono font (AGENTS.md: settings().font_family)
 const ago = (sec) => { const d = Math.max(0, Date.now() / 1000 - sec); return d < 3600 ? `${Math.floor(d / 60)}m` : d < 86400 ? `${Math.floor(d / 3600)}h` : `${Math.floor(d / 86400)}d`; };
 const since = (iso) => ago(Date.parse(iso) / 1000);
@@ -19,55 +19,74 @@ const since = (iso) => ago(Date.parse(iso) / 1000);
 const NONE = "#00000000"; // gpui takes only #rgb/#rrggbb/#rrggbbaa literals — never "transparent"
 const alpha = (c, aa) => (/^#[0-9a-f]{6}$/i.test(c) ? c + aa : c);
 
-// The sidebar has no cwd of its own: the space, the focused pane, or a terminal pane in the same tab.
+// Where the person is: the space, the focused pane, or a terminal pane in the same tab. Read once at init by the views opened without a root (init: this.here), and on clicks.
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
   if (!space) return {}; // its machine's layout is loading: no cwd, so nothing runs locally on a remote path
   const all = panes(), pane = f?.pane ? all.find((p) => p.pane === f.pane) : null;
   const sibling = f?.tab ? all.find((p) => p.tab === f.tab && p.cwd) : null;
-  return { cwd: pane?.cwd || f?.cwd || sibling?.cwd || space?.folder, space: space?.id, machine: space?.machine ?? null };
+  return { cwd: pane?.cwd || f?.cwd || sibling?.cwd || space?.folder, machine: space?.machine ?? null };
 }
 
-const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, ahead: {}, me: null, repoUrl: null });
+const oneByOne = async (fs) => { const out = []; for (const f of fs) out.push(await f()); return out; }; // run thunks one at a time
+const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, ahead: {}, me: null, repoUrl: null, nwo: null, drafts: [] });
 
 export default class Forge extends View {
   init(_p, cx) {
-    this.root = props()?.root ?? null; this.on = props()?.on ?? null; this.ghAt = 0; this.ghRoot = null; this.ghOn = null; this.ghErr = null; this.refreshing = false; this.base = "origin/main";
+    this.root = props()?.root ?? null; this.on = props()?.on ?? null; this.issuesAt = 0; this.refreshing = false; this.base = "origin/main";
     this.data = emptyData(); this.seq = 0; this.watchGen = 0; this.watched = "";
     this.w = 0; this.onSize = (size, cx) => { if (Math.abs((this.w ?? 0) - size.width) >= 1) { this.w = size.width; cx.notify(); } }; // container width: the views branch on narrow()
-    this.filter = "all"; this.shown = 50; this.error = null; this.msgs = {}; this.polling = false; // each view is its own copy of the mod, so these never collide
+    this.filter = "all"; this.shown = 50; this.error = null; // each view is its own copy of the mod, so these never collide
     this.search = InputState.new({ placeholder: "Search" });
     this.search.on("change", (_e, cx) => cx.notify());
-    if (props()?.view === "start") this.initStart(cx);
-    if (props()?.track) this.initDetail(cx);
+    this.repos = []; this.found = { assigned: [], shelved: [], merged: [] }; this.homeErr = null; this.meBy = {}; this.loaded = false; // Home: every repo; meBy: gh login per machine
+    const r = this.route();
+    if (r === "start") this.initStart(cx);
+    if (r === "track") this.initDetail(cx);
+    if (r === "moved") return; // an old docked copy: no git or gh work
+    if (r === "home") { // Home spans every repo: no this.root, no this.here
+      this.seedHome();
+      this.refreshHome(cx);
+      cx.timer.every(GH_TTL, (cx) => { if (!this.refreshing) this.refreshHome(cx); });
+      return;
+    }
+    if (!props()?.root) {
+      const pin = r === "track" && !props()?.track ? this.savedPin() : null; // a restarted key-opened pane stays on its pinned repo, wherever focus is now
+      this.here = pin ? { cwd: pin.path, machine: pin.on ?? null } : location();
+    }
     this.refresh(cx);
-    cx.timer.every(GH_EVERY, (cx) => { if (!this.refreshing) this.refresh(cx); }); // the folder watch covers files, agents() re-renders by itself
-    cx.timer.every(5000, (cx) => { this.relocate(cx); cx.spawn((cx) => this.pollMsgs(cx)); }); // the sidebar follows the shown space; agent messages live in herdr-core, not agents()
+    cx.timer.every(GH_TTL, (cx) => { if (!this.refreshing) this.refresh(cx); }); // the folder watch covers files, agents() re-renders by itself
   }
 
   // --- data ---
   // failed: exec REJECTED (no cwd, no program, machine unreachable) — not the same as git exiting non-zero ("not a repo").
   async git(args, cwd = this.root, on = this.on) { try { const r = await exec("git", [...GIT, ...args], { cwd, on }); return { ok: r.code === 0, out: (r.stdout ?? "").replace(/\n+$/, "") }; } catch { return { ok: false, out: "", failed: true }; } }
   async gh(args, cwd = this.root, on = this.on) { try { const r = await exec("gh", args, { cwd, on }); return r.code === 0 ? JSON.parse(r.stdout || "[]") : null; } catch { return null; } }
-
-  // Cheap: one git call, and a full refresh only when the shown repo (machine + path) changed. Only refresh() changes this.on.
-  relocate(cx) {
-    if (props()?.root) return;
-    const { cwd, machine } = location(); if (!cwd) return;
-    const loc = `${machine ?? ""}\n${cwd}`; if (loc === this.loc) return;
-    this.loc = loc;
-    if (machine !== this.on) { this.refresh(cx); return; } // another machine: always another repo
-    cx.spawn(async (cx) => { const r = await this.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd, machine); if (r.ok && r.out.replace(/\/\.git$/, "") !== this.root) this.refresh(cx); });
+  // One cache for every forge view (shared(): persisted in shared.json; setShared re-renders every mod copy). Fresh → no call.
+  // The 1 s slack keeps a timer that fires every ttl from always landing just inside the window (it would double the real interval).
+  // Stores map(data) so big payloads are slimmed first. A failed call returns the last good data (stale beats empty), else null.
+  // ponytail: two views expiring together both fetch once; harmless at this rate.
+  // `since`: when the data last changed (an entry without one yet: its newest item). Data quiet for long stays fresh longer (cacheLife); quiet = false keeps the base ttl.
+  async cachedGh(key, args, cwd, on, ttl = GH_TTL, map = (x) => x, quiet = true) {
+    const k = `forge.gh.${key}`, hit = shared(k), now = Date.now();
+    if (hit && now - hit.at < cacheLife(ttl, quiet ? hit.since : null, now) - 1000) return hit.data;
+    const data = await this.gh(args, cwd, on);
+    if (data === null) return hit?.data ?? null;
+    const v = map(data), same = hit && JSON.stringify(hit.data) === JSON.stringify(v);
+    setShared(k, { at: now, data: v, since: hit?.since != null && same ? hit.since : hit?.since != null ? now : newest(v) ?? now }); // no since yet (new or pre-quiet entry): seed from the newest item
+    return v;
   }
-  // Every data reset also forgets the gh cache: an emptied list must never pass for a fresh fetch.
-  resetData() { this.data = emptyData(); this.ghAt = 0; this.fetched = 0; }
+
+  // Every data reset also forgets the issues cache: an emptied list must never pass for a fresh fetch.
+  resetData() { this.data = emptyData(); this.issuesAt = 0; this.fetched = 0; }
   refresh(cx) {
     cx.spawn(async (cx) => {
       const seq = ++this.seq; // a newer refresh (or a repo change) supersedes this one: it must not write its data
       this.refreshing = true;
       try {
-        if (!props()?.root) { // the sidebar follows the shown space; other views are pinned to props().root and props().on
-          const { cwd, machine } = location(); if (!cwd) return; this.loc = `${machine ?? ""}\n${cwd}`;
+        if (!props()?.root && this.here) { // only the key-opened Start overlay and track pane: they resolve the repo from where the person was when they opened them (this.here), then stay put; every other view is pinned to props().root and props().on
+          const { cwd, machine } = this.here;
+          if (!cwd) { this.error = "no space or folder to work from"; this.findRepos(cx); cx.notify(); return; }
           if (machine !== this.on) { this.on = machine; this.root = null; this.resetData(); }
           const common = await this.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd, machine);
           if (seq !== this.seq) return;
@@ -75,83 +94,178 @@ export default class Forge extends View {
             const up = await exec("true", [], { on: machine }).then(() => true, () => false); if (seq !== this.seq) return;
             if (!up) { this.error = `can't reach ${machine}` + (this.root ? " — showing the last data" : ""); cx.notify(); return; } // unreachable ≠ not a repo: keep what we have
           }
-          if (!common.ok) { this.root = null; this.resetData(); this.watch([], cx, machine); this.error = "no git repo in this space"; cx.notify(); return; }
+          if (!common.ok) { this.root = null; this.resetData(); this.watch([], cx, machine); this.error = "no git repo in this space"; this.findRepos(cx); cx.notify(); return; }
           const r0 = common.out.replace(/\/\.git$/, "");
           if (r0 !== this.root) { this.root = r0; this.resetData(); } // another repo's PRs, issues and url must never show
         }
-        const root = this.root, on = this.on; // captured: after the first await below, never read this.root / this.on again (the sidebar branch read this.root after its await, safely: only refresh() writes these and each refresh bumps seq)
-        const git = (args, cwd = root) => this.git(args, cwd, on);
-        const base = (await git(["rev-parse", "--verify", "-q", "origin/main"])).ok ? "origin/main" : "main";
-        const list = await git(["worktree", "list", "--porcelain"]);
-        if (seq !== this.seq) return;
-        if (!list.ok) { this.error = list.failed ? (on ? `can't reach ${on} — showing the last data` : "can't run git — showing the last data") : "git worktree list failed — showing the last data"; cx.notify(); return; } // never replace tracks with an empty list
-        const wt = parseWorktrees(list.out);
-        this.watch([`${root}/docs`, ...wt.filter((w) => !w.main).map((w) => `${w.path}/docs`)], cx, on);
-        const docs = {}, ages = {}, ahead = {};
-        const one = async (w) => {
-          const changed = await git(["diff", "--name-only", `${base}...HEAD`, "--", "docs/decisions", "docs/plans"], w.path);
-          const untracked = await git(["ls-files", "--others", "--exclude-standard", "docs/decisions", "docs/plans"], w.path);
-          if (changed.failed || untracked.failed) { const d = this.data; if (d.docs[w.path]) { docs[w.path] = d.docs[w.path]; ages[w.path] = d.ages[w.path] ?? 0; ahead[w.path] = d.ahead[w.path] ?? 0; } return; } // an exec that could not run is not "no docs": keep what we had
-          const files = `${changed.out}\n${untracked.out}`.split("\n").filter(Boolean);
-          const design = files.find((f) => f.startsWith("docs/decisions/")) ?? null, plan = files.find((f) => f.startsWith("docs/plans/")) ?? null;
-          const designText = design ? (await readTextFile(`${w.path}/${design}`, { on }).catch(() => "")) ?? "" : "";
-          // (a pruned worktree never gets here: parseWorktrees drops `prunable` blocks)
-          docs[w.path] = { design, plan, designText };
-          ages[w.path] = Number((await git(["log", "-1", "--format=%ct"], w.path)).out) || 0;
-          ahead[w.path] = Number((await git(["rev-list", "--count", `${base}..HEAD`], w.path)).out) || 0;
-        };
-        const ws = wt.filter((w) => !w.main);
-        if (on) { for (const w of ws) await one(w); } else await Promise.all(ws.map(one)); // ponytail: sequential on a remote — hc runs at most 16 execs per machine and every open view refreshes on its own
-        // ponytail: per-view throttle — docs/ bursts (builds, rebases) reuse the cached lists; one shared cache across views if several open panels ever matter
-        const ghFresh = this.ghRoot === root && this.ghOn === on && Date.now() - this.ghAt < GH_EVERY - 1000;
-        const [prs, issues] = ghFresh ? [this.data.prs, this.data.issues] : await Promise.all([
-          this.gh(["pr", "list", "--state", "all", "--limit", "200", "--json", "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author"], root, on),
-          this.gh(["issue", "list", "--state", "open", "--limit", "500", "--json", "number,title,body,url,labels,author,createdAt"], root, on),
-        ]);
-        const me = this.data.me || (await exec("gh", ["api", "user", "-q", ".login"], { cwd: root, on }).catch(() => ({}))).stdout?.trim() || null; // || not ??: an empty string must retry next time
-        const repoUrl = this.data.repoUrl || (await exec("gh", ["repo", "view", "--json", "url", "-q", ".url"], { cwd: root, on }).catch(() => ({}))).stdout?.trim() || null;
+        const root = this.root, on = this.on; // captured: after the first await below, never read this.root / this.on again (only refresh() writes these and each refresh bumps seq)
+        const r = await this.loadRepo(root, on, this.data);
         if (seq !== this.seq || root !== this.root || on !== this.on) return;
-        this.base = base; this.data = { worktrees: wt, docs, prs: prs ?? this.data.prs, issues: issues ?? this.data.issues, ages, ahead, me, repoUrl };
-        if (!ghFresh) { this.ghAt = Date.now(); this.ghRoot = root; this.ghOn = on; this.ghErr = prs ? null : "gh unavailable — PRs and issues may be stale"; }
-        this.error = this.ghErr; // replaces a "can't reach" from an earlier tick; a cached gh failure stays shown
+        if (!r.ok) { this.error = r.error; cx.notify(); return; } // never replace tracks with an empty list
+        this.watch([`${root}/docs`, ...r.worktrees.filter((w) => !w.main).map((w) => `${w.path}/docs`)], cx, on);
+        let issues = this.data.issues;
+        if (this.needIssues() && Date.now() - this.issuesAt >= GH_TTL - 1000) { // the 500-issue list stays per view and only where it is shown: too big for shared.json
+          const got = await this.gh(["issue", "list", "--state", "open", "--limit", "500", "--json", "number,title,body,url,labels,author,createdAt"], root, on);
+          if (seq !== this.seq) return;
+          if (got) { issues = got; this.issuesAt = Date.now(); }
+        }
+        const me = (await this.cachedGh(`me:${on ?? ""}`, ["api", "user"], root, on, DAY, (u) => u.login)) ?? this.data.me; // a failed lookup keeps a known login
+        if (seq !== this.seq) return;
+        this.base = r.base;
+        this.data = { worktrees: r.worktrees, docs: r.docs, prs: r.prs ?? this.data.prs, issues, ages: r.ages, ahead: r.ahead, me, repoUrl: r.repoUrl, nwo: r.nwo, drafts: r.drafts };
+        this.error = r.prs ? null : "gh unavailable — PRs may be stale";
         this.fetched = Date.now();
-        if (props()?.track) this.loadDoc(cx, !!this.on); // the detail pane's first load: track() is null until this data exists; remote: re-read every tick (no folder watch)
+        if (this.route() === "track") { this.loadDoc(cx, !!this.on); if (this.tab === "issues") this.fetchIssues(cx); } // the detail pane's first load: track() is null until this data exists; remote: re-read every tick (no folder watch)
         cx.notify();
       } finally { if (seq === this.seq) this.refreshing = false; } // a superseded refresh must not clear the newer one's flag
     });
   }
+  // One repo's data, no this.* writes and no seq: the caller (refresh, Home) checks staleness. `prev` supplies keep-what-we-had values; always pass `on` (this.git's defaults are wrong for Home).
+  async loadRepo(root, on, prev = emptyData()) {
+    const git = (args, cwd = root) => this.git(args, cwd, on);
+    const base = (await git(["rev-parse", "--verify", "-q", "origin/main"])).ok ? "origin/main" : "main";
+    const list = await git(["worktree", "list", "--porcelain"]);
+    if (!list.ok) return { ok: false, error: list.failed ? (on ? `can't reach ${on} — showing the last data` : "can't run git — showing the last data") : "git worktree list failed — showing the last data" }; // never replace tracks with an empty list
+    const wt = parseWorktrees(list.out);
+    const docs = {}, ages = {}, ahead = {};
+    const one = async (w) => {
+      const changed = await git(["diff", "--name-only", `${base}...HEAD`, "--", "docs/decisions", "docs/plans"], w.path);
+      const untracked = await git(["ls-files", "--others", "--exclude-standard", "docs/decisions", "docs/plans"], w.path);
+      if (changed.failed || untracked.failed) { if (prev.docs[w.path]) { docs[w.path] = prev.docs[w.path]; ages[w.path] = prev.ages[w.path] ?? 0; ahead[w.path] = prev.ahead[w.path] ?? 0; } return; } // an exec that could not run is not "no docs": keep what we had
+      const files = `${changed.out}\n${untracked.out}`.split("\n").filter(Boolean);
+      const design = files.find((f) => f.startsWith("docs/decisions/")) ?? null, plan = files.find((f) => f.startsWith("docs/plans/")) ?? null;
+      const designText = design ? (await readTextFile(`${w.path}/${design}`, { on }).catch(() => "")) ?? "" : "";
+      // (a pruned worktree never gets here: parseWorktrees drops `prunable` blocks)
+      docs[w.path] = { design, plan, designText };
+      const lg = await git(["log", "-1", "--format=%ct"], w.path), rl = await git(["rev-list", "--count", `${base}..HEAD`], w.path);
+      ages[w.path] = lg.failed ? prev.ages[w.path] ?? 0 : Number(lg.out) || 0; // a rejected exec keeps what we had
+      ahead[w.path] = rl.failed ? prev.ahead[w.path] ?? 0 : Number(rl.out) || 0;
+    };
+    const ws = wt.filter((w) => !w.main);
+    if (on) { for (const w of ws) await one(w); } else await Promise.all(ws.map(one)); // ponytail: sequential on a remote — hc runs at most 16 execs per machine and every open view refreshes on its own
+    const st = await git(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all", "--", "docs/decisions", "docs/plans"]);
+    const dr = st.ok ? drafts(st.out) : (prev.drafts ?? []); // could not run ≠ no drafts
+    const key = `${on ?? ""}:${root}`, pl = (state, limit) => ["pr", "list", "--state", state, "--limit", String(limit), "--json", PR_FIELDS];
+    const busy = Object.values(ages).some((t) => Date.now() / 1000 - t < 86400); // a commit in a linked worktree today: PRs may open or merge any minute, so no quiet stretch
+    const calls = [() => this.cachedGh(`pr-open:${key}`, pl("open", 100), root, on, GH_TTL, (ps) => ps.map(slimPr), !busy),
+      () => this.cachedGh(`pr-merged:${key}`, [...pl("merged", 30), "--author", "@me"], root, on, GH_TTL, (ps) => ps.map(slimPr), !busy),
+      () => this.cachedGh(`repo:${key}`, ["repo", "view", "--json", "url,nameWithOwner"], root, on, DAY)];
+    const [open, done, id] = on ? await oneByOne(calls) : await Promise.all(calls.map((f) => f())); // sequential on a remote: remote exec rule
+    const prs = open && done ? [...open, ...done] : null; // tracks() ignores CLOSED; an OPEN PR on a reused branch still wins (model.js)
+    return { ok: true, base, worktrees: wt, docs, ages, ahead, prs, repoUrl: id?.url ?? prev.repoUrl ?? null, nwo: id?.nameWithOwner ?? prev.nwo ?? null, drafts: dr }; // a failed lookup keeps the previous identity
+  }
+  // Repos = git roots behind open spaces (any machine) ∪ ~/.herdr/worktrees/* on this computer, deduped by machine + git common dir.
+  // A rejected exec (unreachable machine, missing folder) is "unknown", not "not a repo": refreshHome keeps that machine's previous repos.
+  async discoverRepos() {
+    const seen = new Map(), unreachable = new Set(), tried = new Set();
+    const add = async (cwd, on) => {
+      const k = `${on ?? ""}\n${cwd}`; if (tried.has(k)) return false; tried.add(k);
+      const r = await this.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd, on);
+      if (r.failed && on) unreachable.add(on);
+      if (!r.ok) return false;
+      const root = r.out.replace(/\/\.git$/, ""); seen.set(`${on ?? ""}\n${root}`, { root, on: on ?? null }); return true;
+    };
+    for (const s of spaces()) if (s.folder) await add(s.folder, s.machine ?? null); // sequential: remote machines cap concurrent execs
+    const base = `${home()}/.herdr/worktrees`;
+    for (const e of await readdir(base, { withFileTypes: true }).catch(() => [])) {
+      const p = `${base}/${e.name}`;
+      if (await add(p, null)) continue; // a symlink to a repo, or a repo itself
+      for (const k of await readdir(p, { withFileTypes: true }).catch(() => [])) if (k.isDirectory() && await add(`${p}/${k.name}`, null)) break; // a folder of worktrees: any one names the repo
+    }
+    return { repos: [...seen.values()], unreachable };
+  }
+  refreshHome(cx) {
+    cx.spawn(async (cx) => {
+      if (this.refreshing) return; this.refreshing = true;
+      try {
+        const { repos, unreachable } = await this.discoverRepos(), out = [];
+        for (const r of this.repos) if (r.on && (unreachable.has(r.on) || !spaces().some((s) => (s.machine ?? null) === r.on)) && !repos.some((x) => x.root === r.root && x.on === r.on)) repos.push({ root: r.root, on: r.on, stale: true });
+        const load = async ({ root, on, stale }) => { // PR lists come from the shared cache
+          const prev = this.repos.find((r) => r.root === root && r.on === on)?.data ?? emptyData();
+          if (stale) { out.push({ root, on, data: prev, error: `can't reach ${on} — showing the last data` }); return; }
+          const r = await this.loadRepo(root, on, prev);
+          out.push({ root, on, data: r.ok ? { ...r, prs: r.prs ?? prev.prs } : prev, error: r.ok ? null : r.error });
+          if (!this.loaded) { this.repos = [...out]; cx.notify(); } // very first load (no snapshot): show each repo as it arrives
+        };
+        const sinceDay = new Date(Date.now() - DONE_WINDOW_MS).toISOString().slice(0, 10);
+        const search = (key, args) => this.cachedGh(key, ["search", ...args], home(), null);
+        const issueFields = "repository,number,title,url,labels,createdAt"; // no body: Home never reads it and the cache persists
+        const [[assigned, shelved, merged]] = await Promise.all([ // this computer in parallel; each remote machine one exec at a time
+          Promise.all([search("s:assigned", ["issues", "--assignee", "@me", "--state", "open", "--limit", "100", "--json", issueFields]),
+            search("s:shelved", ["issues", "--author", "@me", "--label", "shelved", "--state", "open", "--limit", "100", "--json", issueFields]),
+            search("s:merged", ["prs", "--author", "@me", "--merged-at", `>=${sinceDay}`, "--limit", "100", "--json", "repository,number,title,url,closedAt"])]),
+          ...repos.filter((r) => !r.on).map(load),
+          ...[...new Set(repos.filter((r) => r.on).map((r) => r.on))].map((m) => oneByOne(repos.filter((r) => r.on === m).map((r) => () => load(r)))),
+        ]);
+        this.repos = out;
+        this.found = { assigned: assigned ?? this.found.assigned, shelved: shelved ?? this.found.shelved, merged: merged ?? this.found.merged };
+        this.homeErr = [assigned, shelved, merged].includes(null) ? "gh search unavailable — Planned/Done may be stale" : null;
+        const meBy = {};
+        for (const { root, on } of out) if (!((on ?? "") in meBy)) meBy[on ?? ""] = (await this.cachedGh(`me:${on ?? ""}`, ["api", "user"], root, on, DAY, (u) => u.login)) ?? this.meBy[on ?? ""]; // one lookup per machine, sequential
+        this.meBy = meBy; this.loaded = true;
+        this.saveHome();
+        cx.notify();
+      } finally { this.refreshing = false; }
+    });
+  }
+  // Home's last result in shared.json, so a new Home tab paints at once and refreshes behind it. PR lists are not copied: they are
+  // read back from their gh cache entries, whatever their age. Design text keeps only the lines tracks() reads.
+  // ponytail: one snapshot for all Home copies; the last refresh to finish wins, which is fine — they read the same sources.
+  saveHome() {
+    const slim = (d) => ({ ...d, prs: undefined, docs: Object.fromEntries(Object.entries(d.docs).map(([k, v]) => [k, { ...v, designText: (v.designText ?? "").split("\n").filter((l) => /#\d/.test(l)).join("\n") }])) });
+    setShared("forge.home", { repos: this.repos.map(({ root, on, error, data }) => ({ root, on, error, data: slim(data) })), found: this.found, meBy: this.meBy });
+  }
+  seedHome() {
+    const h = shared("forge.home"); if (!h?.repos) return;
+    const prs = (on, root) => { const k = `${on ?? ""}:${root}`, o = shared(`forge.gh.pr-open:${k}`)?.data, m = shared(`forge.gh.pr-merged:${k}`)?.data; return o && m ? [...o, ...m] : []; };
+    this.repos = h.repos.map((r) => ({ ...r, data: { ...emptyData(), ...r.data, prs: prs(r.on, r.root) } }));
+    this.found = h.found ?? this.found; this.meBy = h.meBy ?? {}; this.loaded = true;
+  }
+  homeModel() { // live: agents() changes re-render this view by themselves
+    const ps = panes();
+    const repos = this.repos.map(({ root, on, data }) => {
+      const ag = agentsOn(agents(), spaces(), on).map((a) => ({ address: a.address, status: a.status, cwd: ps.find((p) => p.pane === a.pane)?.cwd ?? null }));
+      return { root, on, nwo: data.nwo, drafts: data.drafts, tracks: tracks({ worktrees: data.worktrees, docs: data.docs, prs: data.prs ?? [], agents: ag, ages: data.ages, ahead: data.ahead, me: this.meBy[on ?? ""] ?? null }) }; // that machine's gh user filters Done
+    });
+    return homeGroups({ repos, ...this.found });
+  }
+  needIssues() { const r = this.route(); return r === "backlog" || r === "start"; }
   // One loop per docs/ dir (main root + each linked worktree); the set restarts only when the path list changes. A missing dir rejects: wait and retry while the set is current.
-  // watchFolder is this computer only: a remote root watches nothing and the GH_EVERY refresh picks up its docs. An empty set still ends the old loops.
+  // watchFolder is this computer only: a remote root watches nothing and the GH_TTL refresh picks up its docs. An empty set still ends the old loops.
   watch(paths, cx, on) {
     if (on) paths = [];
     const key = paths.join("\n"); if (key === this.watched) return;
     this.watched = key; const gen = ++this.watchGen;
     for (const p of paths) cx.spawn(async (cx) => { while (gen === this.watchGen) { try { await watchFolder(p); if (gen === this.watchGen) this.refresh(cx); } catch { await cx.sleep(5000); } } });
   }
-  // agents() has no status message; herdr-core does (`hc get <t> --json` → .status.msg). Polled every 5s for agents on tracks only, by the views that
-  // show reason text (sidebar, board, detail). One poll in flight per view: a hung remote `hc get` must not stack processes every tick.
-  async pollMsgs(cx) {
-    const v = props()?.view; if (v === "start" || v === "backlog" || this.polling) return;
-    this.polling = true;
-    try {
-      const on = [...new Set(this.live().flatMap((t) => t.agents.map((a) => a.address)))];
-      let changed = false;
-      await Promise.all(on.map(async (addr) => {
-        let msg = null;
-        try { const r = await hc(["get", addr, "--json"]); msg = r.code === 0 ? (JSON.parse(r.stdout || "{}").status?.msg ?? null) : null; } catch { msg = null; }
-        if ((this.msgs[addr] ?? null) !== msg) { this.msgs[addr] = msg; changed = true; }
-      }));
-      for (const k of Object.keys(this.msgs)) if (!on.includes(k)) { delete this.msgs[k]; changed = true; }
-      if (changed) cx.notify();
-    } finally { this.polling = false; }
-  }
   // Live: agents() and panes() change on their own and re-render this view; join them to tracks by cwd, on this view's machine only.
   live() {
     const ps = panes();
-    const ag = agentsOn(agents(), spaces(), this.on).map((a) => ({ address: a.address, status: a.status, cwd: ps.find((p) => p.pane === a.pane)?.cwd ?? null, msg: this.msgs[a.address] ?? null }));
+    const ag = agentsOn(agents(), spaces(), this.on).map((a) => ({ address: a.address, status: a.status, cwd: ps.find((p) => p.pane === a.pane)?.cwd ?? null }));
     return tracks({ ...this.data, agents: ag });
   }
-  track() { return this.live().find((t) => t.path === props().track) ?? null; }
+  // Start passes props.track. A key-opened pane (props {view:"track"}) resolves once from where the person was (this.here)
+  // and remembers it, with its machine, in this copy's localStorage (per copy — verified live): a restart with focus elsewhere
+  // re-resolves the same repo from the pin (init). ponytail: a cached one-time resolution, not tracked state; if it names a removed worktree the pane says so.
+  savedPin() { try { const p = JSON.parse(localStorage.getItem("forge.track")); return typeof p?.path === "string" ? p : null; } catch { return null; } } // an old plain-string value or garbage: ignored
+  trackPath() {
+    if (props()?.track) return props().track;
+    if (this.pinned) return this.pinned;
+    const saved = this.savedPin();
+    if (saved) return (this.pinned = saved.path);
+    const p = trackFor(this.data.worktrees, this.here?.cwd);
+    if (p) { this.pinned = p; try { localStorage.setItem("forge.track", JSON.stringify({ path: p, on: this.on })); } catch {} } // storage unavailable: the pin lives in this.pinned only
+    return p;
+  }
+  track() { const p = this.trackPath(); return p ? this.live().find((t) => t.path === p) ?? null : null; } // tracks() also holds PR-only Done items with path null: never match those
+  async fetchIssues(cx) {
+    const tr = this.track(); if (!tr) return;
+    for (const n of tr.issues) { // sequential: remote exec rule
+      const i = await this.cachedGh(`issue:${this.on ?? ""}:${this.root}:${n}`, ["issue", "view", String(n), "--json", "number,title,url,state"], this.root, this.on);
+      this.issueInfo[n] = i === null ? { failed: true } : i.url?.includes("/issues/") ? i : { pr: true }; // gh issue view resolves PR numbers too
+    }
+    cx.notify();
+  }
   narrow(px) { return this.w > 0 && this.w < px; } // false until the first layout reports a width
   repoName() { return (this.root ?? "").split("/").pop(); }
   // That machine's home: Herdr's worktree path rule is ~/.herdr/worktrees/<repo>/<branch-with-dashes> on the space's machine. Pattern: mods/worktree/main.js:136.
@@ -163,51 +277,33 @@ export default class Forge extends View {
   }
   repoUrl() { return this.data.repoUrl ?? "https://github.com"; }
 
-  // --- collapse: the docked panel resizes its own layout block (pattern: mods/workspace-chrome toggleSidebar) ---
-  // layout() is the window tree (blocks, stacks, rows); tab panes (the board, detail, backlog copies of this mod) are not nodes in it — only the docked copy is, as a block with content.mod === "forge" (verified against layouts/main-plus.json).
-  myBlock() { const find = (n) => (n?.type === "block" && n?.content?.mod === "forge" ? n : (n?.children ?? []).map(find).find(Boolean)); return find(layout()) ?? null; }
-  collapse() {
-    if (props()?.root) return; // only the docked sidebar copy folds; a sidebar opened as a tab must not resize the docked block
-    const b = this.myBlock(); if (!b) return;
-    const px = b.size?.px ?? Math.round(this.w);
-    if (px >= 100) setShared("forge.width", px); // a second click before the re-render would otherwise remember the rail width and › could never reopen
-    run("layout.resize", { id: b.id, px: RAIL });
-  }
-  expand() { const b = this.myBlock(); if (b) run("layout.resize", { id: b.id, px: Math.max(100, shared("forge.width") ?? 340) }); }
-  renderRail(cx) {
-    const t = theme(), g = grouped(this.live()), needs = g[0].items.length, flight = g[1].items.length;
-    const badge = (n, color) => div().px(5).py(1).rounded(8).text_size(10.5).font_semibold().bg(alpha(color, "22")).text_color(color).child(String(n));
-    return v_flex().id("root").size_full().bg(t.surface).items_center().pt(10).gap(10).cursor_pointer().hover((e) => e.bg(t.hover)).on_click(() => this.expand()).on_size_change(this.onSize)
-      .child(div().text_size(14).text_color(t.muted).child("›"))
-      .when(needs > 0, (e) => e.child(badge(needs, t.blocked)))
-      .when(flight > 0, (e) => e.child(badge(flight, t.accent)));
-  }
-
   // --- actions: every write is an agent's or the person's, never the panel's bookkeeping ---
   // Harness-agnostic: the agent is Herdr's most-picked installed one (knownAgents is ordered that way); no model choice here.
-  async openAgent(path, task, argv) {
-    argv ??= (await knownAgents({ on: this.on })).find((a) => a.installed)?.run ?? ["claude"];
-    const space = spaces().find((s) => s.folder === path && (s.machine ?? null) === this.on); // ponytail: folder match; a space made by Start/worktree mod has exactly this folder
-    if (space) run("tab.new", { space: space.id, argv, task }); else run("space.new", { folder: path, machine: this.on, argv, task });
+  async openAgent(path, task, argv, on = this.on) {
+    argv ??= (await knownAgents({ on })).find((a) => a.installed)?.run ?? ["claude"];
+    const space = spaces().find((s) => s.folder === path && (s.machine ?? null) === (on ?? null)); // ponytail: folder match; a space made by Start/worktree mod has exactly this folder
+    if (space) run("tab.new", { space: space.id, argv, task }); else run("space.new", { folder: path, machine: on ?? "", argv, task });
   }
   openGitHub(url) { exec("open", [url]); }
-  openBoard() { run("tab.new", { name: "Forge", space: location().space, mod: "forge", props: { view: "board", root: this.root, on: this.on } }); }
-  openBacklog() { run("tab.new", { name: "Backlog", space: location().space, mod: "forge", props: { view: "backlog", root: this.root, on: this.on } }); }
-  openDetail(t) { run("pane.split", { direction: "right", mod: "forge", props: { track: t.path, root: this.root, on: this.on } }); }
-  openStart(issue) { openOverlay({ mod: "forge", props: { view: "start", root: this.root, on: this.on, issue: issue?.number ?? null }, kind: "dialog", width: 720, height: 720 }); }
+  openHome() { run("tab.new", { name: "Forge", mod: "forge", props: { view: "home" } }); }
+  openStart(issue, root = this.root, on = this.on) { openOverlay({ mod: "forge", props: { view: "start", root, on, issue }, kind: "dialog", width: 720, height: 720 }); }
   // The next verb for a track, run by an agent in that worktree.
-  next(t) {
+  next(t, ctx = { root: this.root, on: this.on }) {
     if (!t.path) return { label: "Open PR", go: () => this.openGitHub(t.pr.url) };
     if (t.agents.some((a) => a.status === "blocked")) return { label: "Answer", go: () => run("agent.focus", { terminal: t.agents.find((a) => a.status === "blocked").address }) };
     if (t.agents.some((a) => a.status === "working")) return { label: "Open tab", go: () => run("agent.focus", { terminal: t.agents.find((a) => a.status === "working").address }) };
     if (t.merged) { // Herdr's own Remove worktree dialog closes the space it is given — only when this track has one (mods/worktree/main.js:2 documents {space, folder?, action}); otherwise an agent removes it
-      const sp = spaces().find((s) => s.folder === t.path && (s.machine ?? null) === this.on);
+      const sp = spaces().find((s) => s.folder === t.path && (s.machine ?? null) === (ctx.on ?? null));
       // that dialog can --force, so offer it only for a clean worktree; a dirty one goes to the agent, which never forces
-      return { label: "Remove worktree", go: async () => { const st = sp ? await this.git(["status", "--porcelain"], t.path) : null; return st?.ok && !st.out ? openOverlay({ mod: "worktree", props: { action: "remove", space: sp.id, folder: t.path }, kind: "dialog" })
-        : this.openAgent(this.root, `This branch is merged. Run: git worktree remove "${t.path}" (never --force; if it refuses, say why and stop), then git branch -d ${t.branch} (never -D). Then stop.`); } };
+      return { label: "Remove worktree", go: async () => { const st = sp ? await this.git(["status", "--porcelain"], t.path, ctx.on) : null; return st?.ok && !st.out ? openOverlay({ mod: "worktree", props: { action: "remove", space: sp.id, folder: t.path }, kind: "dialog" })
+        : this.openAgent(ctx.root, `This branch is merged. Run: git worktree remove "${t.path}" (never --force; if it refuses, say why and stop), then git branch -d ${t.branch} (never -D). Then stop.`, undefined, ctx.on); } };
     }
     // /forge:start is the only begin verb: it reads the branch and routes (debug / brainstorm / plan / build / review); the label is for the human.
-    return { label: nextLabel(t), go: () => this.openAgent(t.path, "/forge:start") };
+    return { label: nextLabel(t), go: () => this.openAgent(t.path, "/forge:start", undefined, ctx.on) };
+  }
+  draftStart(d, root, on) { // /forge:plan moves the uncommitted draft into a fresh worktree; /forge:start would not see it there
+    const task = d.plan ? `/forge:plan ${d.design ?? d.plan} — the plan ${d.plan} is already written: skip authoring and go straight to the hand-off` : `/forge:plan ${d.design}`;
+    return { label: d.plan ? "Dispatch" : "Plan", go: () => this.openAgent(root, task, undefined, on) };
   }
   shelve(t) { this.openAgent(t.path, "/forge:shelve"); }
 
@@ -219,97 +315,77 @@ export default class Forge extends View {
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => fn(cx)); // fn gets a fresh cx: never close over render's
   }
   link(t, id, label, url) { return this.button(t, id, `${label} ↗`, () => this.openGitHub(url)).bg(NONE).text_color(t.ansi12); }
-  groupColor(t, key) { return { needs: t.blocked, flight: t.accent, hold: t.muted, done: t.ansi2 }[key]; }
-  header(t, title, right) {
+  groupColor(t, key) { return { needs: t.blocked, flight: t.accent, hold: t.muted, planned: t.ansi12, done: t.ansi2 }[key]; }
+  header(t, title, right, sub = `${this.repoName()} · ${this.base.replace("origin/", "")}`) {
     return h_flex().px(12).py(8).items_center().gap(8).flex_wrap().border_b(1).border_color(t.border)
       .child(div().font_semibold().text_size(14).child(title))
-      .child(MONO(div()).text_size(11).text_color(t.muted).truncate().min_w(0).child(`${this.repoName()} · ${this.base.replace("origin/", "")}`))
+      .child(MONO(div()).text_size(11).text_color(t.muted).truncate().min_w(0).child(sub))
       .child(h_flex().flex_grow(1).min_w(0).justify_end().items_center().gap(8).flex_wrap().children(right ?? [])); // grows from its content width, so a crowded header wraps this group to a second line
   }
   empty(t, text) { return div().px(8).py(4).text_size(12).text_color(t.dim).child(text); }
 
-  // --- sidebar (default) ---
-  renderSidebar(cx) {
-    if (this.w > 0 && this.w < 100) return this.renderRail(cx);
-    const t = theme(), groups = grouped(this.live());
-    const row = (g, s) => {
-      const color = this.groupColor(t, g.key), needs = g.key === "needs", key = s.path ?? "pr" + s.pr.number;
-      return v_flex().id(`s-${key}`).px(6).py(5).rounded(6).gap(3).cursor_pointer().bg(needs ? alpha(t.blocked, "14") : NONE).hover((e) => e.bg(t.hover))
-        .on_click(() => (s.path ? this.openDetail(s) : this.openGitHub(s.pr.url)))
-        .child(h_flex().items_center().gap(8).min_w(0)
-          .child(div().w(8).h(8).rounded(4).bg(s.agents.length ? color : t.idle))
-          .child(div().flex_1().min_w(0).truncate().font_medium().child(s.slug))
-          .child(MONO(div()).text_size(10.5).flex_none().text_color(t.muted).child(s.pr && s.progress.total ? `${s.progress.done}/${s.progress.total}` : s.group === "done" ? `#${s.pr.number}` : ago(s.at))))
-        .child(h_flex().items_center().gap(8).pl(16).min_w(0)
-          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(needs ? t.blocked : t.muted).child(s.reason)));
+  renderHome(cx) {
+    const t = theme(), groups = this.homeModel(), label = (name, on) => (on ? `${name} @ ${on}` : name);
+    const repoCell = (it) => MONO(div()).w(120).flex_none().min_w(0).truncate().text_size(11).text_color(t.muted).child(label(it.repo, it.on));
+    const muted = (text) => MONO(div()).flex_none().text_size(11).text_color(t.muted).child(text);
+    const row = (id) => h_flex().id(id).px(8).py(5).gap(10).items_center().min_w(0).rounded(6).hover((e) => e.bg(t.hover));
+    const focusSpace = (it) => () => { // a row jumps to its worktree's space, opening one if it has none
+      const sp = spaces().find((s) => s.folder === it.path && (s.machine ?? null) === (it.on ?? null));
+      if (sp) run("space.select", { id: sp.id }); else run("space.new", { folder: it.path, machine: it.on ?? "" });
     };
-    return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground).on_size_change(this.onSize)
-      .child(this.header(t, "Forge", [
-        this.button(t, "board", "⤢", () => this.openBoard()),
-        this.button(t, "start", "+", () => this.openStart()),
-        this.button(t, "fold", "‹", () => this.collapse()),
-      ]))
-      .when(this.error, (el) => el.child(this.empty(t, this.error)))
-      .child(v_flex().flex_1().overflow_y_scroll().px(6).py(8).gap(14).children(groups.map((g) =>
-        v_flex().gap(2)
-          .child(h_flex().px(6).pb(4).gap(6).items_center()
-            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(g.title.toUpperCase() + (g.key === "done" ? DONE_SUFFIX : "")))
-            .child(MONO(div()).text_size(10.5).text_color(t.muted).child(String(g.items.length))))
-          .children(g.items.length ? g.items.map((s) => row(g, s)) : [this.empty(t, g.key === "needs" ? "nothing waiting on you" : "none")]))))
-      .child(v_flex().border_t(1).border_color(t.border)
-        .child(h_flex().id("backlog").px(12).py(9).items_center().gap(8).cursor_pointer().hover((e) => e.bg(t.hover)).on_click(() => this.openBacklog())
-          .child(div().text_size(12).child("View backlog"))
-          .child(h_flex().flex_1())
-          .child(MONO(div()).text_size(11).text_color(t.muted).child(`${this.data.issues.length} open`)))
-        .child(h_flex().px(12).pb(8).gap(8).items_center().text_size(11).text_color(t.muted)
-          .child(div().w(6).h(6).rounded(3).bg(this.error ? t.blocked : t.ansi2))
-          .child(div().child(this.fetched ? `${this.on ? `polling ${this.on}` : "watching docs/"} · PRs ${ago(this.fetched / 1000)} ago` : "loading…"))));
-  }
-
-  renderBoard(cx) {
-    const t = theme(), all = this.live(), q = this.search.value().trim().toLowerCase();
-    const groups = grouped(all.filter((s) => !q || `${s.slug} ${s.branch} ${s.reason}`.toLowerCase().includes(q))).filter((g) => this.filter === "all" || g.key === this.filter);
-    const chips = [["all", "All"], ["needs", "Needs you"], ["flight", "In flight"], ["hold", "On hold"], ["done", "Done"]];
-    const card = (g, s) => {
-      const color = this.groupColor(t, g.key), nx = this.next(s), key = s.path ?? "pr" + s.pr.number;
-      const art = (label, file) => div().px(6).py(1).rounded(4).text_size(10.5).border(1).border_color(file ? t.border : NONE).when(!file, (e) => e.border_color(t.dim).text_color(t.dim)).child(file ? label : `${label} —`);
-      return v_flex().id(`c-${key}`).p(12).gap(8).rounded(8).bg(t.raised).border(1).border_color(g.key === "needs" ? alpha(t.blocked, "66") : t.border).cursor_pointer().hover((e) => e.border_color(t.input))
-        .on_click(() => (s.path ? this.openDetail(s) : this.openGitHub(s.pr.url)))
-        .child(h_flex().items_center().gap(8)
-          .child(div().font_semibold().flex_1().min_w(0).truncate().child(s.slug))
-          .child(div().px(6).py(1).rounded(9).text_size(10.5).flex_none().bg(alpha(color, "22")).text_color(color).child(chip(s)))
-          .child(MONO(div()).text_size(11).text_color(t.muted).truncate().min_w(0).flex_shrink(1).child(s.branch)))
-        .child(h_flex().gap(6).items_center().flex_wrap()
-          .when(s.path, (e) => e.child(art("design", s.design)).child(art("plan", s.plan)))
-          .when(s.pr, (e) => e.child(this.link(t, `pr-${key}`, `PR #${s.pr.number}${s.pr.isDraft ? " draft" : ""}`, s.pr.url)))
-          .children(s.issues.slice(0, 3).map((n) => this.link(t, `i-${key}-${n}`, `#${n}`, `${this.repoUrl()}/issues/${n}`))))
-        .when(s.progress.total > 0, (e) => e.child(h_flex().items_center().gap(8)
-          .child(div().flex_1().min_w(0).h(4).rounded(2).bg(t.border).child(div().h(4).rounded(2).bg(color).w(`${Math.round(100 * s.progress.done / s.progress.total)}%`)))
-          .child(MONO(div()).text_size(10.5).text_color(t.muted).child(`${s.progress.done}/${s.progress.total}`))))
-        .child(h_flex().items_center().gap(8)
-          .child(div().w(8).h(8).rounded(4).bg(s.agents.length ? color : t.idle))
-          .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(g.key === "needs" ? t.blocked : t.muted).child(s.agents.length ? `${s.agents.length} agent${s.agents.length > 1 ? "s" : ""} · ${s.reason}` : `${s.reason} · ${ago(s.at)}`))
-          .child(h_flex().flex_none().gap(8).child(this.button(t, `nx-${key}`, nx.label, nx.go, true))
-            .when(!s.merged && s.path, (e) => e.child(this.button(t, `sh-${key}`, "Shelve", () => this.shelve(s))))));
+    const item = (g, it) => {
+      const color = this.groupColor(t, g.key);
+      if (g.key === "planned") {
+        const key = `${it.issue.repository.nameWithOwner}-${it.issue.number}`;
+        return row(`h-p-${key}`)
+          .child(repoCell(it))
+          .child(muted(`#${it.issue.number}`))
+          .child(div().flex_1().min_w(0).truncate().child(it.issue.title))
+          .child(muted(it.shelved ? "shelved" : "assigned"))
+          .child(muted(ago(it.at)))
+          .when(it.root, (e) => e.child(this.button(t, `h-ps-${key}`, it.shelved ? "Resume" : "Start", () => this.openStart(it.issue.number, it.root, it.on), true)))
+          .child(this.link(t, `h-pl-${key}`, "", it.issue.url));
+      }
+      if (it.draft) {
+        const key = `${it.on ?? ""}-${it.root}-${it.slug}`, ds = this.draftStart(it, it.root, it.on);
+        return row(`h-d-${key}`)
+          .child(repoCell(it))
+          .child(div().flex_1().min_w(0).truncate().child(it.slug))
+          .child(muted(`${it.design ? "design ✓" : "design –"} · ${it.plan ? "plan ✓" : "plan –"}`))
+          .child(muted("on main"))
+          .child(this.button(t, `h-dd-${key}`, ds.label, ds.go, true));
+      }
+      const key = `${g.key}-${it.on ?? ""}-${it.path ?? it.pr.url}`, nx = it.path ? this.next(it, { root: it.root, on: it.on }) : null;
+      return row(`h-${key}`).when(it.path, (e) => e.cursor_pointer().on_click(focusSpace(it)))
+        .child(repoCell(it))
+        .when(g.key === "done", (e) => e
+          .child(muted(`#${it.pr.number}`))
+          .child(div().flex_1().min_w(0).truncate().child(it.pr.title))
+          .child(muted(`merged ${ago(it.at)}`))
+          .child(this.link(t, `h-dl-${key}`, "", it.pr.url)))
+        .when(g.key !== "done", (e) => e
+          .child(MONO(div()).flex_1().min_w(0).truncate().child(it.branch))
+          .child(it.agents.length
+            ? div().px(6).py(1).rounded(9).flex_none().text_size(10.5).bg(alpha(color, "22")).text_color(color).child(g.key === "needs" && !it.agents.some((a) => a.status === "blocked") ? "review PR" : chip(it))
+            : muted(`○ no agent · ${it.ahead} ahead · ${ago(it.at)}`))
+          .when(it.progress?.total, (e) => e.child(muted(`${it.progress.done}/${it.progress.total}`)))
+          .when(it.pr, (e) => e.child(this.link(t, `h-pr-${key}`, `PR #${it.pr.number}`, it.pr.url))))
+        .when(nx, (e) => e.child(this.button(t, `h-nx-${key}`, nx.label, nx.go, g.key !== "done")));
     };
-    const counts = grouped(all).map((g) => `${g.items.length} ${g.title.toLowerCase()}`).join(" · ");
     return v_flex().id("root").size_full().bg(t.canvas).text_size(13).text_color(t.foreground).on_size_change(this.onSize)
-      .child(this.header(t, "Forge", [
-        div().w(220).min_w(140).flex_shrink(1).h(28).px(8).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.surface).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().w_full().text_size(12)),
-        ...chips.map(([k, l]) => this.button(t, `f-${k}`, l, (cx) => { this.filter = k; cx.notify(); }).when(this.filter === k, (e) => e.bg(t.selection))),
-        this.button(t, "start", "Start work", () => this.openStart(), true),
-      ]))
-      .child(h_flex().px(12).py(6).gap(12).text_size(11.5).text_color(t.muted).items_center()
-        .child(div().child(counts))
-        .child(h_flex().flex_1())
-        .child(this.button(t, "backlog", `View backlog · ${this.data.issues.length} open issues`, () => this.openBacklog()).bg(NONE).text_color(t.ansi12)))
-      .when(this.error, (el) => el.child(this.empty(t, this.error)))
-      .child(v_flex().flex_1().overflow_y_scroll().px(12).pb(12).gap(16).children(groups.map((g) =>
-        v_flex().gap(8)
-          .child(h_flex().gap(6).items_center()
-            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(g.title.toUpperCase() + (g.key === "done" ? DONE_SUFFIX : "")))
-            .child(MONO(div()).text_size(10.5).text_color(t.muted).child(String(g.items.length))))
-          .children(g.items.length ? g.items.map((s) => card(g, s)) : [this.empty(t, "none")]))));
+      .child(this.header(t, "Home", [this.button(t, "start", "+ Start work", () => this.openStart(null, null, null), true)], "all repos"))
+      .when(this.homeErr, (el) => el.child(this.empty(t, this.homeErr)))
+      .children(this.repos.filter((r) => r.error).map((r) => this.empty(t, `${label(r.root.split("/").pop(), r.on)}: ${r.error}`)))
+      .when(!this.loaded && !this.repos.length, (el) => el.child(this.empty(t, "loading…")))
+      .when(this.loaded || this.repos.length, (el) => el.child(v_flex().id("home-body").flex_1().min_h(0).overflow_y_scroll().px(12).py(10).gap(16).children(groups.filter((g) => this.loaded || g.key !== "done").map((g) => // Done needs this.meBy: hidden until the first load ends
+
+        v_flex().gap(2)
+          .child(h_flex().px(8).pb(4).gap(6).items_center()
+            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(`${g.title.toUpperCase()} · ${g.items.length}${g.key === "done" ? DONE_SUFFIX : ""}`)))
+          .children(g.items.length ? g.items.map((it) => item(g, it)) : [this.empty(t, "nothing")])
+          .when(g.key === "planned", (el) => el.child(h_flex().px(8).py(4).gap(8).items_center().flex_wrap().text_size(11.5).text_color(t.muted)
+            .child(div().child("Backlogs:"))
+            .children(this.repos.map((r) => this.button(t, `h-bk-${r.on ?? ""}-${r.root}`, label(r.root.split("/").pop(), r.on), () => run("tab.new", { name: "Backlog", mod: "forge", props: { view: "backlog", root: r.root, on: r.on } }))))))))));
   }
   renderBacklog(cx) {
     const t = theme(), q = this.search.value().trim().toLowerCase(), taken = takenIssues(this.live()), me = this.data.me;
@@ -330,13 +406,13 @@ export default class Forge extends View {
         .when(wide, (e) => e.child(cell(150, div().truncate().text_size(11).text_color(t.muted).child(tk ? `in track "${tk}"` : from)))
           .child(cell(90, div().px(6).rounded(9).truncate().text_size(10.5).bg(parked ? alpha(t.accent, "22") : t.border).text_color(parked ? t.ansi12 : t.muted).child(parked ? "agent" : i.author?.login === me ? "you" : i.author?.login ?? ""))))
         .child(cell(32, MONO(div()).text_size(11).text_color(t.muted).child(since(i.createdAt))))
-        .child(cell(56, tk ? div() : this.button(t, `st-${i.number}`, "Start", () => this.openStart(i))));
+        .child(cell(56, tk ? div() : this.button(t, `st-${i.number}`, "Start", () => this.openStart(i.number))));
     };
     return v_flex().id("root").size_full().bg(t.canvas).text_size(13).text_color(t.foreground).on_size_change(this.onSize)
       .child(this.header(t, "Backlog", [
         div().w(240).min_w(140).flex_shrink(1).h(28).px(8).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.surface).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().w_full().text_size(12)),
         ...chips.map(([k, l]) => this.button(t, `f-${k}`, l, (cx) => { this.filter = k; this.shown = 50; cx.notify(); }).when(this.filter === k, (e) => e.bg(t.selection))),
-        this.button(t, "board", "Board", () => this.openBoard()),
+        this.button(t, "home", "Home", () => this.openHome()),
       ]))
       .when(this.error, (el) => el.child(this.empty(t, this.error)))
       .when(shelved.length, (el) => el.child(v_flex().mx(12).mt(10).p(10).gap(6).rounded(8).bg(t.surface).border(1).border_color(alpha(t.ansi5, "66"))
@@ -345,7 +421,7 @@ export default class Forge extends View {
           .child(this.link(t, `shl-${i.number}`, `#${i.number}`, i.url))
           .child(div().flex_1().min_w(0).truncate().child(i.title))
           .child(MONO(div()).text_size(11).text_color(t.muted).child(since(i.createdAt)))
-          .child(this.button(t, `rs-${i.number}`, "Resume", () => this.openStart(i), true))))))
+          .child(this.button(t, `rs-${i.number}`, "Resume", () => this.openStart(i.number), true))))))
       .child(v_flex().flex_1().overflow_y_scroll().px(12).py(10).gap(1)
         .child(h_flex().px(8).pb(4).gap(10).text_size(10.5).font_semibold().text_color(t.muted)
           .child(cell(64, div().child("ISSUE"))).when(wide, (e) => e.child(cell(72, div().child("KIND")))).child(div().flex_1().min_w(0).child("TITLE")).when(wide, (e) => e.child(cell(150, div().child("PARKED FROM"))).child(cell(90, div().child("BY")))).child(cell(32, div().child("AGE"))).child(cell(56, div())))
@@ -355,10 +431,11 @@ export default class Forge extends View {
           .when(rows.length > this.shown, (e) => e.child(this.button(t, "more", "Load 50 more", (cx) => { this.shown += 50; cx.notify(); })))));
   }
   initDetail(cx) {
-    this.tab = "design"; this.docs = {}; this.editing = false; this.editor = null; this.saveMsg = null; this.log = []; this.reloading = false;
-    cx.spawn(async (cx) => { if (this.on) return; // a remote track: refresh() (GH_EVERY timer) reloads it
+    this.tab = "design"; this.docs = {}; this.editing = false; this.editor = null; this.saveMsg = null; this.log = []; this.reloading = false; this.issueInfo = {}; this.prBody = null;
+    cx.spawn(async (cx) => { if (this.on) return; // a remote track: refresh() (GH_TTL timer) reloads it
+      while (!this.trackPath()) { if (this.data.worktrees.length || (this.error && !this.root)) return; await cx.sleep(1000); } // a key-opened pane has no path until refresh() has the worktrees; loaded and still none: not in a track, nothing will change that
       for (;;) {
-      try { await watchFolder(`${props().track}/docs`); } catch { if (this.data.worktrees.length && !this.track()) return; await cx.sleep(5000); continue; }
+      try { await watchFolder(`${this.trackPath()}/docs`); } catch { if (this.data.worktrees.length && !this.track()) return; await cx.sleep(5000); continue; }
       if (!this.editing) { this.docs = {}; this.loadDoc(cx); }
     } }); // ends only when the worktree is gone (a missing docs/ retries every 5 s); while editing, save() reconciles instead
     this.loadDoc(cx);
@@ -416,11 +493,32 @@ export default class Forge extends View {
   }
   renderDetail(cx) {
     const t = theme(), tr = this.track();
-    if (!tr) return v_flex().id("root").size_full().bg(t.surface).p(12).gap(8).text_color(t.dim).child(this.data.worktrees.length ? "This track's worktree is gone (shelved or removed)." : "loading…");
+    if (!tr) {
+      const pane = (...kids) => v_flex().id("root").size_full().bg(t.surface).p(12).gap(8).text_color(t.dim).children(kids);
+      if (!this.data.worktrees.length && !this.error) return pane("loading…");
+      if (this.trackPath() && this.data.worktrees.length) return pane("This track's worktree is gone (shelved or removed).");
+      const here = this.data.drafts ?? [];
+      return pane(div().font_semibold().text_size(14).text_color(t.foreground).child(this.repoName() || "No repo"), this.data.worktrees.length ? "Not in a track." : this.error,
+        ...(here.length ? [div().text_size(12).text_color(t.muted).child("Drafts here (not dispatched yet)"), ...here.map((d) => {
+          const ds = this.draftStart(d, this.root, this.on);
+          return h_flex().gap(8).items_center().min_w(0)
+            .child(MONO(div()).flex_1().min_w(0).truncate().text_color(t.foreground).child(`${d.slug} · ${d.design ? "design ✓" : "design –"} · ${d.plan ? "plan ✓" : "plan –"}`))
+            .children([["design", "Read design"], ["plan", "Read plan"]].filter(([k]) => d[k] && !this.on).map(([k, l]) => this.button(t, `rd-${d.slug}-${k}`, l, () => exec("open", [`${this.root}/${d[k]}`]))))
+            .child(this.button(t, `ds-${d.slug}`, ds.label, ds.go, true));
+        })] : []),
+        h_flex().gap(8).child(this.button(t, "start", "+ Start work", () => this.openStart(null), true))
+          .child(this.button(t, "home", "Home", () => this.openHome())));
+    }
     const color = this.groupColor(t, tr.group), nx = this.next(tr), gh = this.repoUrl();
-    const tabs = [["design", "Design"], ["plan", "Plan"], ["pr", tr.pr ? `PR #${tr.pr.number}${tr.pr.isDraft ? " (draft)" : ""}` : "PR"], ["issues", `Issues (${tr.issues.length})`]];
+    const tabs = [["design", "Design"], ["plan", "Plan"], ["pr", tr.pr ? `PR #${tr.pr.number}${tr.pr.isDraft ? " (draft)" : ""}` : "PR"], ["issues", `Issues (${tr.issues.filter((n) => !this.issueInfo[n]?.pr).length})`]];
     const tabEl = (k, l) => div().id(`t-${k}`).flex_none().px(10).py(7).text_size(12.5).cursor_pointer().border_b(2).border_color(this.tab === k ? t.accent : NONE).text_color(this.tab === k ? t.foreground : t.muted).child(l)
-      .on_click((_e, cx) => { if (this.editing) return; this.tab = k; cx.notify(); });
+      .on_click((_e, cx) => {
+        if (this.editing) return;
+        this.tab = k;
+        if (k === "issues") cx.spawn((cx) => this.fetchIssues(cx));
+        if (k === "pr" && tr.pr) { const n = tr.pr.number; cx.spawn(async (cx) => { const r = await this.cachedGh(`prbody:${this.on ?? ""}:${this.root}:${n}`, ["pr", "view", String(n), "--json", "body"], this.root, this.on); this.prBody = r ? { n, body: r.body } : { n, body: null, failed: true }; cx.notify(); }); }
+        cx.notify();
+      });
     const doc = (key) => {
       const d = this.docs[key];
       if (!tr[key]) return v_flex().p(12).gap(8).child(div().text_color(t.dim).child(`no ${key} on this branch yet`)).child(this.button(t, `mk-${key}`, key === "design" ? "Brainstorm" : "Plan", () => this.openAgent(tr.path, "/forge:start"), true));
@@ -444,12 +542,13 @@ export default class Forge extends View {
     const prTab = () => !tr.pr ? this.empty(t, "no PR yet — the build opens a draft PR as its first step")
       : v_flex().flex_1().min_h(0).px(16).py(12).gap(8)
         .child(h_flex().gap(8).items_center().child(div().font_semibold().flex_1().min_w(0).truncate().child(tr.pr.title)).child(div().text_size(11).text_color(t.muted).child(tr.pr.state.toLowerCase())).child(this.link(t, "prgh", "Open on GitHub", tr.pr.url)))
-        .child(TextView.markdown("pr-body", tr.pr.body ?? "").selectable().scrollable());
-    const issuesTab = () => v_flex().p(8).gap(2).children(tr.issues.length ? tr.issues.map((n) => {
-      const i = this.data.issues.find((x) => x.number === n);
+        .when(this.prBody?.n === tr.pr.number && this.prBody.failed, (e) => e.child(div().text_size(11).text_color(t.muted).child("couldn't load the full description")))
+        .child(TextView.markdown("pr-body", (this.prBody?.n === tr.pr.number && !this.prBody.failed ? this.prBody.body : tr.pr.body) ?? "").selectable().scrollable());
+    const issuesTab = () => v_flex().p(8).gap(2).children(tr.issues.length ? tr.issues.filter((n) => !this.issueInfo[n]?.pr).map((n) => {
+      const i = this.issueInfo[n];
       return h_flex().id(`li-${n}`).px(8).py(6).rounded(6).gap(8).items_center().hover((e) => e.bg(t.hover))
         .child(MONO(div()).text_size(11).text_color(t.muted).child(`#${n}`))
-        .child(div().flex_1().min_w(0).truncate().child(i?.title ?? "(closed or not loaded)"))
+        .child(div().flex_1().min_w(0).truncate().text_color(i?.state === "CLOSED" || !i || i.failed ? t.dim : t.foreground).child(!i ? "loading…" : i.failed ? "couldn't load" : i.title))
         .child(this.link(t, `ligh-${n}`, "Open on GitHub", i?.url ?? `${gh}/issues/${n}`));
     }) : [this.empty(t, "no linked issues")]);
     const slim = this.narrow(720); // below this the rail goes: reason + Next move under the header
@@ -487,10 +586,16 @@ export default class Forge extends View {
         .when(!slim, (el) => el.child(rail)));
   }
   initStart(cx) {
+    this.pickRepos = null; this.finding = false; // repos to choose from when no repo is focused; null until discovered
     this.mode = "issue"; this.sel = props().issue ?? null; this.alsoIssue = true; this.busy = null;
     this.title = InputState.new({ placeholder: "e.g. Shelve a track with a reason" });
     this.title.on("change", (_e, cx) => cx.notify());
     this.brief = TextareaState.new({ placeholder: "Links, constraints, what you already ruled out…", rows: 6 });
+  }
+  findRepos(cx) { // once per open: discovery can take ~20 s with a connected machine
+    if (this.route() !== "start" || this.pickRepos !== null || this.finding) return;
+    this.finding = true; cx.notify();
+    cx.spawn(async (cx) => { try { this.pickRepos = (await this.discoverRepos()).repos; } finally { this.finding = false; cx.notify(); } });
   }
   // Always a worktree (the design: a track is a worktree), at Herdr's path so the spaces sidebar nests it under the repo.
   // Then one agent tab there with /forge:start — the agent decides debug / brainstorm / plan / build by reading.
@@ -528,7 +633,9 @@ export default class Forge extends View {
       if (r.code !== 0) { this.busy = (r.stderr || "git worktree add failed").trim(); cx.notify(); return; }
       const extra = this.mode === "issue" ? "" : this.brief.value().trim();
       const task = issue ? `/forge:start #${issue.number}` : `/forge:start ${title}${extra ? `\n\n${extra}` : ""}${this.alsoIssue ? "\n\nAlso open a GitHub issue for this so it shows in the backlog if it stalls." : ""}`;
+      const hadSpace = spaces().some((s) => s.folder === path && (s.machine ?? null) === (this.on ?? null)); // only a fresh space.new focuses the new space; an existing one goes through tab.new, whose focus is undocumented
       await this.openAgent(path, task, argv);
+      if (!hadSpace) run("pane.split", { direction: "right", mod: "forge", props: { view: "track", track: path, root: this.root, on: this.on } }); // run() returns no ids: this splits the focused pane, which openAgent's space.new/tab.new just made
       this.dismiss();
     } catch (e) { this.busy = String(e?.message ?? e); cx.notify(); }
   }
@@ -551,13 +658,21 @@ export default class Forge extends View {
           .child(MONO(div()).w(28).text_size(11).text_color(t.muted).child(since(i.createdAt))))
         .when(tk, (e) => e.child(div().pl(26).text_size(11).text_color(t.muted).child(`already in track "${tk}" — open it instead`)));
     };
-    const footer = this.mode === "issue"
+    const picking = !this.root && (this.finding || this.pickRepos?.length > 0); // no repo focused: choose one first
+    const pick = (r, i) => h_flex().id(`rp-${i}`).px(10).py(7).rounded(6).gap(8).items_center().cursor_pointer().hover((e) => e.bg(t.hover))
+      .on_click((_e, cx) => { this.root = r.root; this.on = r.on; this.here = null; this.error = null; this.busy = null; this.resetData(); this.refresh(cx); })
+      .child(div().font_medium().child(r.root.split("/").pop()))
+      .when(r.on, (e) => e.child(div().text_size(11).text_color(t.muted).child(r.on)));
+    const footer = picking ? "Pick a repo to start work in" : this.mode === "issue"
       ? (sel ? `Worktree ${branchFor(sel)}${/Branch: `/.test(sel.body ?? "") ? " (resumes the shelved branch)" : ""} · agent tab opens there with #${sel.number}` : "Pick an issue")
       : "Worktree from your one-liner · agent tab opens there with your brief";
     return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground).rounded(10).on_size_change(this.onSize)
-      .child(this.header(t, "Start work", [this.button(t, "close", "✕", () => this.dismiss())]))
-      .child(h_flex().px(16).border_b(1).border_color(t.border).child(tab("issue", "From an issue")).child(tab("scratch", "From scratch")))
-      .when(this.mode === "issue", (el) => el
+      .child(this.header(t, "Start work", [this.button(t, "close", "✕", () => this.dismiss())], this.root ? undefined : picking ? "pick a repo" : ""))
+      .when(picking, (el) => el.child(v_flex().flex_1().overflow_y_scroll().px(8).py(8).gap(2)
+        .child(div().px(8).pb(4).text_size(12).text_color(t.muted).child("Start work in…"))
+        .children(this.pickRepos ? this.pickRepos.map(pick) : [this.empty(t, "finding repos…")])))
+      .when(!picking, (el) => el.child(h_flex().px(16).border_b(1).border_color(t.border).child(tab("issue", "From an issue")).child(tab("scratch", "From scratch"))))
+      .when(!picking && this.mode === "issue", (el) => el
         .child(h_flex().px(16).py(10).gap(8).items_center()
           .child(div().flex_1().h(28).px(8).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.canvas).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().w_full().text_size(12)))
           .child(div().text_size(12).text_color(t.muted).child(`${this.data.issues.length} open · ${[...taken.keys()].filter((n) => this.data.issues.some((i) => i.number === n)).length} already in a track`)))
@@ -569,7 +684,7 @@ export default class Forge extends View {
             .child(this.link(t, "gh", "View on GitHub", sel.url)))
           .child(div().text_size(12.5).text_color(t.muted).max_h(60).overflow_hidden().child((sel.body ?? "").split("\n").filter(Boolean).slice(0, 3).join(" ")))
           .child(div().text_size(12).text_color(t.muted).child("The agent reads the issue and picks how to begin: a bug starts with debug, a feature with brainstorm; a design or plan already on a branch is resumed. Nothing to choose here.")))))
-      .when(this.mode === "scratch", (el) => el.child(v_flex().flex_1().px(16).py(16).gap(14)
+      .when(!picking && this.mode === "scratch", (el) => el.child(v_flex().flex_1().px(16).py(16).gap(14)
         .child(div().text_size(12).text_color(t.muted).child("What is it? One line — this becomes the slug"))
         .child(div().h(32).px(10).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.canvas).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.title).h_full().w_full().text_size(13)))
         .child(div().text_size(12).text_color(t.muted).child("Anything the agent should know (optional)"))
@@ -580,15 +695,32 @@ export default class Forge extends View {
       .child(h_flex().px(16).py(12).gap(8).items_center().border_t(1).border_color(t.border)
         .child(div().flex_1().text_size(12).text_color(this.busy && !this.busy.endsWith("…") ? t.blocked : t.muted).child(this.busy ?? footer))
         .child(this.button(t, "cancel", "Cancel", () => this.dismiss()))
-        .child(this.button(t, "go", this.mode === "issue" ? (sel ? `Start from #${sel.number}` : "Start") : "Start", (cx) => { if (!this.busy?.endsWith("…")) cx.spawn((cx) => this.start(cx)); }, true)));
+        .when(!picking, (e) => e.child(this.button(t, "go", this.mode === "issue" ? (sel ? `Start from #${sel.number}` : "Start") : "Start", (cx) => { if (!this.busy?.endsWith("…")) cx.spawn((cx) => this.start(cx)); }, true))));
   }
 
-  render(cx) {
+  // Which view this copy is. mod.open:forge (the ⌘⇧N key) opens the overlay with props {overlay} only — verified live 2026-11-06.
+  // A docked layout block from before this change gets no props at all: "moved".
+  route() {
     const p = props() ?? {};
-    if (p.view === "start") return this.renderStart(cx);
-    if (p.track) return this.renderDetail(cx);
-    if (p.view === "board") return this.renderBoard(cx);
-    if (p.view === "backlog") return this.renderBacklog(cx);
-    return this.renderSidebar(cx);
+    if (p.view === "start" || (p.overlay && !p.view)) return "start";
+    if (p.view === "track" || p.track) return "track";
+    if (p.view === "home") return "home";
+    if (p.view === "backlog") return "backlog";
+    return "moved";
+  }
+  render(cx) {
+    switch (this.route()) {
+      case "start": return this.renderStart(cx);
+      case "track": return this.renderDetail(cx);
+      case "backlog": return this.renderBacklog(cx);
+      case "home": return this.renderHome(cx);
+      default: return this.renderMoved();
+    }
+  }
+  renderMoved() {
+    const t = theme();
+    return v_flex().id("root").size_full().bg(t.surface).p(12).gap(6)
+      .child(div().child("Forge moved out of the dock."))
+      .child(div().text_color(t.muted).child("Run scripts/install-herdr-mod.sh: it adds keys for Home, Start work and the track pane, and prints the command to hide this block."));
   }
 }

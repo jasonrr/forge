@@ -1,6 +1,5 @@
 // Pure derivation: the panel is a function of git worktrees, the docs on each branch, gh
 // PRs/issues and the host's agents. No herdr import, so `node --test` runs it.
-export const GROUPS = [["needs", "Needs you"], ["flight", "In flight"], ["hold", "On hold"], ["done", "Done"]];
 export const DONE_WINDOW_MS = 7 * 86400 * 1000; // merged PRs stay under Done this long after their worktree is gone — gh is the memory, nothing is stored
 
 // `git worktree list --porcelain`: blocks of "worktree <path>\nHEAD <sha>\n(branch refs/heads/x|detached)"; the first block is the main checkout.
@@ -61,7 +60,7 @@ function group(t) {
   return "hold";
 }
 
-// The card's one line: what the agent says it is doing; without one, the facts on disk.
+// The Home row's / track pane's one line: what the agent says it is doing; without one, the facts on disk.
 const lead = (t) => t.agents.find((x) => x.status === "blocked") ?? t.agents.find((x) => x.status === "working") ?? t.agents[0] ?? null;
 function reason(t) {
   const a = lead(t);
@@ -74,7 +73,7 @@ function reason(t) {
   return `${who} · ${t.ahead} commit${t.ahead === 1 ? "" : "s"} ahead · ${pr}`;
 }
 
-export function chip(t) { const a = lead(t); return a && (a.status === "blocked" || a.status === "working") ? a.status : t.merged ? "merged" : a?.status ?? "no agent"; } // the card's status chip: the agent that decides the group, else merged
+export function chip(t) { const a = lead(t); return a && (a.status === "blocked" || a.status === "working") ? a.status : t.merged ? "merged" : a?.status ?? "no agent"; } // the Home row's status chip: the agent that decides the group, else merged
 
 // The action button's label: the forge verb the branch is at. The PR decides first (docs vanish from `diff base...HEAD` after a rebase onto
 // merged docs, and fix/ branches never have any); then which docs exist. /forge:start routes by itself; this is for the human.
@@ -127,13 +126,6 @@ export function agentsOn(agents, spaces, on) {
   return agents.filter((a) => m.has(a.space) && m.get(a.space) === (on ?? null));
 }
 
-export function grouped(ts) {
-  return GROUPS.map(([key, title]) => {
-    const items = ts.filter((t) => t.group === key).sort((a, b) => (key === "hold" ? a.at - b.at : b.at - a.at));
-    return { key, title, items };
-  });
-}
-
 // issue number -> slug of the track that references it (greyed in Start work).
 export function takenIssues(ts) {
   const m = new Map();
@@ -158,4 +150,81 @@ export function branchFor(issue, title) {
 // Forge's agents file issues as `[p<sev>] …` with "From PR #n" / "From review of …" / "Filed from the plan".
 export function isParked(issue) {
   return /^\[p\d\]/.test(issue.title ?? "") || /\b(From (PR|review)|Filed from|Parked|Deferred from)\b/.test(issue.body ?? "");
+}
+
+// The shared gh cache persists to shared.json on every write: keep only the body lines the panel reads —
+// checklist boxes (progress, planTasks ticks) and lines with #refs (linked issues). The PR tab fetches the full body on demand.
+export function slimPr(p) {
+  const body = (p.body ?? "").split("\n").map((l) => /^\s*- \[[ xX]\]/.test(l) ? l : linked(l).map((n) => `#${n}`).join(" ")).filter(Boolean).join("\n"); // checklist lines whole; prose shrinks to its #refs (all linked() reads)
+  return { ...p, body };
+}
+
+// The deepest linked (non-main) worktree whose folder holds cwd, or null.
+export function trackFor(worktrees, cwd) {
+  if (!cwd) return null;
+  const hits = worktrees.filter((w) => !w.main && under(cwd, w.path)).sort((a, b) => b.path.length - a.path.length);
+  return hits[0]?.path ?? null;
+}
+
+export const HOME_GROUPS = [["needs", "Waiting on you"], ["flight", "In flight"], ["planned", "Planned"], ["done", "Done"]];
+// New, uncommitted design/plan files in a checkout (`git status --porcelain --untracked-files=all -- docs/decisions docs/plans`):
+// the work brainstorm/plan are writing before a worktree exists. Only new files (?? or A); an edit to a committed doc is not a draft.
+export function drafts(porcelain) {
+  const by = new Map();
+  for (const line of (porcelain ?? "").split("\n")) {
+    const m = /^(\?\?|A[ MD]) (docs\/(decisions|plans)\/\d{4}-\d{2}-\d{2}-([^/]+)\.md)$/.exec(line.trimEnd());
+    if (!m) continue;
+    const [, , file, dir, slug] = m, d = by.get(slug) ?? { slug, design: null, plan: null };
+    d[dir === "decisions" ? "design" : "plan"] = file; by.set(slug, d);
+  }
+  return [...by.values()];
+}
+
+// Home across repos. repos: [{root, on, nwo, tracks, drafts?}] with tracks from tracks(). assigned/shelved: `gh search issues` rows
+// ({repository:{name,nameWithOwner}, number, title, url, labels, createdAt}). merged: `gh search prs --merged-at` rows
+// ({repository, number, title, url, closedAt}; search has no mergedAt, and closedAt is the merge time for a merged PR).
+export function homeGroups({ repos = [], assigned = [], shelved = [], merged = [], now = Date.now() }) {
+  const items = { needs: [], flight: [], planned: [], done: [] };
+  const taken = new Set(), seenPr = new Set(), byNwo = new Map(repos.filter((r) => r.nwo).sort((a, b) => (a.on == null) - (b.on == null)).map((r) => [r.nwo, r])); // a repo on this computer wins over a same-nwo remote one: Map keeps the last, so sort it last
+  const withPath = new Set(repos.flatMap((r) => r.tracks.filter((t) => t.path && t.pr?.url).map((t) => t.pr.url))); // a PR that has a worktree anywhere: that row wins over PR-only copies
+  for (const r of [...repos].sort((a, b) => (a.on == null ? 0 : 1) - (b.on == null ? 0 : 1))) { // this computer's copy first, so it wins a duplicate
+    const repo = r.root.split("/").pop();
+    for (const t of r.tracks) {
+      if (!t.path && t.pr?.url && (seenPr.has(t.pr.url) || withPath.has(t.pr.url))) continue; // the same PR-only Done item from another machine's copy of the repo
+      items[t.group === "hold" ? "flight" : t.group].push({ ...t, repo, root: r.root, on: r.on ?? null });
+      if (t.pr?.url) seenPr.add(t.pr.url);
+      if (!t.merged && r.nwo) for (const n of t.issues) taken.add(`${r.nwo}#${n}`);
+    }
+    for (const d of r.drafts ?? []) items.flight.push({ draft: true, path: null, slug: d.slug, design: d.design, plan: d.plan, repo, root: r.root, on: r.on ?? null, agents: [], issues: [], at: 0, group: "draft" });
+  }
+  const seen = new Set();
+  for (const [i, shelf] of [...shelved.map((i) => [i, true]), ...assigned.map((i) => [i, false])]) {
+    const nwo = i.repository?.nameWithOwner, key = `${nwo}#${i.number}`;
+    if (seen.has(key) || taken.has(key)) continue;
+    seen.add(key);
+    const r = byNwo.get(nwo);
+    items.planned.push({ issue: i, shelved: shelf, repo: i.repository?.name ?? nwo, root: r?.root ?? null, on: r?.on ?? null, at: Date.parse(i.createdAt) / 1000 || 0 });
+  }
+  for (const p of merged) {
+    const ms = Date.parse(p.closedAt);
+    if (seenPr.has(p.url) || !(now - ms <= DONE_WINDOW_MS)) continue;
+    items.done.push({ path: null, branch: null, pr: { ...p, state: "MERGED", mergedAt: p.closedAt }, repo: p.repository?.name ?? "", root: byNwo.get(p.repository?.nameWithOwner)?.root ?? null, on: null, agents: [], issues: [], at: ms / 1000, merged: true, group: "done" });
+  }
+  const rank = (it) => (it.group === "flight" ? 0 : it.draft ? 1 : 2); // agent-backed, then drafts, then no-agent
+  items.flight.sort((a, b) => rank(a) - rank(b) || (rank(a) === 0 ? b.at - a.at : rank(a) === 2 ? a.at - b.at : 0));
+  items.needs.sort((a, b) => b.at - a.at);
+  items.planned.sort((a, b) => (b.shelved - a.shelved) || b.at - a.at); // shelved first, then newest
+  items.done.sort((a, b) => b.at - a.at);
+  return HOME_GROUPS.map(([key, title]) => ({ key, title, items: items[key] }));
+}
+
+// How long a gh cache entry counts as fresh: its base ttl, stretched to 1/20 of how long its data has gone unchanged, up to QUIET_CAP.
+// Quiet 1 h → 3 min; 10 h or more → 30 min. A base ttl above the cap (identity: a day) is never shortened.
+export const QUIET_CAP = 30 * 60000;
+export function cacheLife(ttl, since, now) { return since != null ? Math.max(ttl, Math.min(QUIET_CAP, (now - since) / 20)) : ttl; }
+// The newest timestamp in a gh list (PRs: updatedAt/mergedAt; search hits: closedAt/createdAt), or null: seeds a new entry's quiet time.
+export function newest(list) {
+  if (!Array.isArray(list)) return null;
+  const ts = list.map((x) => Date.parse(x?.updatedAt ?? x?.mergedAt ?? x?.closedAt ?? x?.createdAt)).filter((n) => n > 0);
+  return ts.length ? Math.max(...ts) : null;
 }

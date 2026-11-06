@@ -35,6 +35,8 @@ The dev-loop skills used to ship inside the [tally](https://github.com/jasonrr/h
 
 ## Herdr work panel
 
-In the Herdr desktop app, a bundled mod shows your forge work as tracks (one per git worktree) in four views: a docked sidebar, a work board, a track detail view with editing, and a backlog of open issues, with every GitHub link one click away and no stored state. Install it with `bash scripts/install-herdr-mod.sh`, which symlinks `herdr/mods/forge` into `~/.config/herdr-app/mods/forge`. Start work and Shelve run `/forge:start` and `/forge:shelve` in an agent tab.
+In the Herdr desktop app, a bundled mod shows your forge work: a **Home** tab across every repo (waiting on you, in flight including drafts on main, planned, done), a **track pane** per worktree (design / plan / PR / issues, Shelve), a per-repo **backlog**, and a **Start work** dialog. Start work and Shelve run `/forge:start` and `/forge:shelve` in an agent tab.
+
+Install it with `bash scripts/install-herdr-mod.sh`. It symlinks `herdr/mods/forge` into `~/.config/herdr-app/mods/forge`, adds ⌘⇧H (Home), ⌘⇧N (Start work) and ⌘⇧J (track pane) to `keys.json` without replacing a binding you already have, and prints the command to hide the old docked block. To go back to the docked sidebar, run the script from a checkout of the older version, and run `herdr-app do layout.show '{"id":"<id>"}'`.
 
 MIT.
