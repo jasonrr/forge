@@ -42,3 +42,4 @@
 - The plan routed main-checkout drafts through /forge:start, but start only reads artifacts on the branch it creates, and an untracked draft never reaches that branch → before a plan hands a file path to a skill, read that skill's routing for where it looks; /forge:plan is the only skill that moves main-checkout drafts.
 - A review-fix pass that changes load order (progressive render) can expose state that was only consistent at the end of the old sequence (Done before meBy) → re-review a fix with the question "what was only true after the old last step?"
 - The same GitHub repo checked out on two connected machines doubles every per-repo list Home merges (Done showed each PR twice) → when aggregating across machines, dedupe by GitHub identity (nwo / PR url), not by root path.
+- A per-key TTL cache with no stale-while-revalidate → every view opened after the TTL waits on the full sequential refetch; paint from the last result first, refresh behind it.
