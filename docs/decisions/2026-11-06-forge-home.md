@@ -70,3 +70,4 @@ None blocking. Verified live on 2026-11-06 with a throwaway probe mod: `mod.open
 ## Deviations
 
 - T1 commit d8603b0 — deviation: none. Review: p2 null-nwo leaves track issues untaken → fixed in T2 (loadRepo keeps prev.nwo); p3s ruled no-change (future closedAt = clock skew, Done on:null unused, >30-merged dedupe gap, idle-agent hold rank, same repo on two machines) — parked: none
+- T2 commit 43997b9 + 5a6a1d6 — deviation: loadRepo keeps prev.nwo/repoUrl on a failed lookup (T1 review p2); merged PR list adds --author @me (review p2: teammates pushed own merges out of the 30; tracks() drops them anyway); me falls back to the last login. Ruled no-change: sidebar/board issue counts (views deleted in T3), slim PR body in PR tab (T4 fetches full), >100 open PRs, fetched footer while serving stale cache — parked: none
