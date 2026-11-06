@@ -585,8 +585,9 @@ export default class Forge extends View {
       if (r.code !== 0) { this.busy = (r.stderr || "git worktree add failed").trim(); cx.notify(); return; }
       const extra = this.mode === "issue" ? "" : this.brief.value().trim();
       const task = issue ? `/forge:start #${issue.number}` : `/forge:start ${title}${extra ? `\n\n${extra}` : ""}${this.alsoIssue ? "\n\nAlso open a GitHub issue for this so it shows in the backlog if it stalls." : ""}`;
+      const hadSpace = spaces().some((s) => s.folder === path && (s.machine ?? null) === (this.on ?? null)); // only a fresh space.new focuses the new space; an existing one goes through tab.new, whose focus is undocumented
       await this.openAgent(path, task, argv);
-      run("pane.split", { direction: "right", mod: "forge", props: { view: "track", track: path, root: this.root, on: this.on } }); // run() returns no ids: this splits the focused pane, which openAgent's space.new/tab.new just made
+      if (!hadSpace) run("pane.split", { direction: "right", mod: "forge", props: { view: "track", track: path, root: this.root, on: this.on } }); // run() returns no ids: this splits the focused pane, which openAgent's space.new/tab.new just made
       this.dismiss();
     } catch (e) { this.busy = String(e?.message ?? e); cx.notify(); }
   }
@@ -611,14 +612,14 @@ export default class Forge extends View {
     };
     const picking = !this.root && (this.finding || this.pickRepos?.length > 0); // no repo focused: choose one first
     const pick = (r, i) => h_flex().id(`rp-${i}`).px(10).py(7).rounded(6).gap(8).items_center().cursor_pointer().hover((e) => e.bg(t.hover))
-      .on_click((_e, cx) => { this.root = r.root; this.on = r.on; this.here = null; this.error = null; this.resetData(); this.refresh(cx); })
+      .on_click((_e, cx) => { this.root = r.root; this.on = r.on; this.here = null; this.error = null; this.busy = null; this.resetData(); this.refresh(cx); })
       .child(div().font_medium().child(r.root.split("/").pop()))
       .when(r.on, (e) => e.child(div().text_size(11).text_color(t.muted).child(r.on)));
     const footer = picking ? "Pick a repo to start work in" : this.mode === "issue"
       ? (sel ? `Worktree ${branchFor(sel)}${/Branch: `/.test(sel.body ?? "") ? " (resumes the shelved branch)" : ""} · agent tab opens there with #${sel.number}` : "Pick an issue")
       : "Worktree from your one-liner · agent tab opens there with your brief";
     return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground).rounded(10).on_size_change(this.onSize)
-      .child(this.header(t, "Start work", [this.button(t, "close", "✕", () => this.dismiss())], this.root ? undefined : "pick a repo"))
+      .child(this.header(t, "Start work", [this.button(t, "close", "✕", () => this.dismiss())], this.root ? undefined : picking ? "pick a repo" : ""))
       .when(picking, (el) => el.child(v_flex().flex_1().overflow_y_scroll().px(8).py(8).gap(2)
         .child(div().px(8).pb(4).text_size(12).text_color(t.muted).child("Start work in…"))
         .children(this.pickRepos ? this.pickRepos.map(pick) : [this.empty(t, "finding repos…")])))
@@ -646,7 +647,7 @@ export default class Forge extends View {
       .child(h_flex().px(16).py(12).gap(8).items_center().border_t(1).border_color(t.border)
         .child(div().flex_1().text_size(12).text_color(this.busy && !this.busy.endsWith("…") ? t.blocked : t.muted).child(this.busy ?? footer))
         .child(this.button(t, "cancel", "Cancel", () => this.dismiss()))
-        .child(this.button(t, "go", this.mode === "issue" ? (sel ? `Start from #${sel.number}` : "Start") : "Start", (cx) => { if (!this.busy?.endsWith("…")) cx.spawn((cx) => this.start(cx)); }, true)));
+        .when(!picking, (e) => e.child(this.button(t, "go", this.mode === "issue" ? (sel ? `Start from #${sel.number}` : "Start") : "Start", (cx) => { if (!this.busy?.endsWith("…")) cx.spawn((cx) => this.start(cx)); }, true))));
   }
 
   // Which view this copy is. mod.open:forge (the ⌘⇧N key) opens the overlay with props {overlay} only — verified live 2026-11-06.
