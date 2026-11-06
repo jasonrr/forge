@@ -4,13 +4,14 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
 import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, setShared, shared } from "herdr";
-import { writeFile, mkdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app (AGENTS.md "Other built-ins")
-import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, branchFor, shelfBranch, slimPr, trackFor } from "./model.js";
+import { writeFile, mkdir, readdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app, reads under home (AGENTS.md "Other built-ins")
+import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, branchFor, shelfBranch, slimPr, trackFor, homeGroups, DONE_WINDOW_MS } from "./model.js";
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const PR_FIELDS = "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author";
 const GH_TTL = 60000; // gh results are cached across all forge views for this long (shared()); GraphQL budget: 5000 pts/h per user
 const DAY = 86400000;
+const DONE_SUFFIX = ` · ${DONE_WINDOW_MS / 86400000} DAYS`;
 const MONO = (el) => el.font_family(settings().font_family); // the terminal's mono font (AGENTS.md: settings().font_family)
 const ago = (sec) => { const d = Math.max(0, Date.now() / 1000 - sec); return d < 3600 ? `${Math.floor(d / 60)}m` : d < 86400 ? `${Math.floor(d / 3600)}h` : `${Math.floor(d / 86400)}d`; };
 const since = (iso) => ago(Date.parse(iso) / 1000);
@@ -37,10 +38,16 @@ export default class Forge extends View {
     this.filter = "all"; this.shown = 50; this.error = null; // each view is its own copy of the mod, so these never collide
     this.search = InputState.new({ placeholder: "Search" });
     this.search.on("change", (_e, cx) => cx.notify());
+    this.repos = []; this.found = { assigned: [], shelved: [], merged: [] }; this.homeErr = null; this.me = null; // Home: every repo
     const r = this.route();
     if (r === "start") this.initStart(cx);
     if (r === "track") this.initDetail(cx);
     if (r === "moved") return; // an old docked copy: no git or gh work
+    if (r === "home") { // Home spans every repo: no this.root, no this.here
+      this.refreshHome(cx);
+      cx.timer.every(GH_TTL, (cx) => { if (!this.refreshing) this.refreshHome(cx); });
+      return;
+    }
     if (!props()?.root) {
       const pin = r === "track" && !props()?.track ? this.savedPin() : null; // a restarted key-opened pane stays on its pinned repo, wherever focus is now
       this.here = pin ? { cwd: pin.path, machine: pin.on ?? null } : location();
@@ -139,6 +146,60 @@ export default class Forge extends View {
     const prs = open && done ? [...open, ...done] : null; // tracks() ignores CLOSED; an OPEN PR on a reused branch still wins (model.js)
     return { ok: true, base, worktrees: wt, docs, ages, ahead, prs, repoUrl: id?.url ?? prev.repoUrl ?? null, nwo: id?.nameWithOwner ?? prev.nwo ?? null }; // a failed lookup keeps the previous identity
   }
+  // Repos = git roots behind open spaces (any machine) ∪ ~/.herdr/worktrees/* on this computer, deduped by machine + git common dir.
+  // A rejected exec (unreachable machine, missing folder) is "unknown", not "not a repo": refreshHome keeps that machine's previous repos.
+  async discoverRepos() {
+    const seen = new Map(), unreachable = new Set(), tried = new Set();
+    const add = async (cwd, on) => {
+      const k = `${on ?? ""}\n${cwd}`; if (tried.has(k)) return false; tried.add(k);
+      const r = await this.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd, on);
+      if (r.failed && on) unreachable.add(on);
+      if (!r.ok) return false;
+      const root = r.out.replace(/\/\.git$/, ""); seen.set(`${on ?? ""}\n${root}`, { root, on: on ?? null }); return true;
+    };
+    for (const s of spaces()) if (s.folder) await add(s.folder, s.machine ?? null); // sequential: remote machines cap concurrent execs
+    const base = `${home()}/.herdr/worktrees`;
+    for (const e of await readdir(base, { withFileTypes: true }).catch(() => [])) {
+      const p = `${base}/${e.name}`;
+      if (await add(p, null)) continue; // a symlink to a repo, or a repo itself
+      for (const k of await readdir(p, { withFileTypes: true }).catch(() => [])) if (k.isDirectory() && await add(`${p}/${k.name}`, null)) break; // a folder of worktrees: any one names the repo
+    }
+    return { repos: [...seen.values()], unreachable };
+  }
+  refreshHome(cx) {
+    cx.spawn(async (cx) => {
+      if (this.refreshing) return; this.refreshing = true;
+      try {
+        const { repos, unreachable } = await this.discoverRepos(), out = [];
+        for (const r of this.repos) if (r.on && unreachable.has(r.on) && !repos.some((x) => x.root === r.root && x.on === r.on)) repos.push({ root: r.root, on: r.on, stale: true });
+        for (const { root, on, stale } of repos) { // sequential; PR lists come from the shared cache
+          const prev = this.repos.find((r) => r.root === root && r.on === on)?.data ?? emptyData();
+          if (stale) { out.push({ root, on, data: prev, error: `can't reach ${on} — showing the last data` }); continue; }
+          const r = await this.loadRepo(root, on, prev);
+          out.push({ root, on, data: r.ok ? r : prev, error: r.ok ? null : r.error });
+        }
+        const since = new Date(Date.now() - DONE_WINDOW_MS).toISOString().slice(0, 10);
+        const search = (key, args) => this.cachedGh(key, ["search", ...args], home(), null);
+        const issueFields = "repository,number,title,url,labels,createdAt"; // no body: Home never reads it and the cache persists
+        const assigned = await search("s:assigned", ["issues", "--assignee", "@me", "--state", "open", "--limit", "100", "--json", issueFields]);
+        const shelved = await search("s:shelved", ["issues", "--author", "@me", "--label", "shelved", "--state", "open", "--limit", "100", "--json", issueFields]);
+        const merged = await search("s:merged", ["prs", "--author", "@me", "--merged-at", `>=${since}`, "--limit", "100", "--json", "repository,number,title,url,closedAt"]);
+        this.repos = out;
+        this.found = { assigned: assigned ?? this.found.assigned, shelved: shelved ?? this.found.shelved, merged: merged ?? this.found.merged };
+        this.homeErr = [assigned, shelved, merged].includes(null) ? "gh search unavailable — Planned/Done may be stale" : null;
+        this.me = await this.cachedGh("me:", ["api", "user"], home(), null, DAY, (u) => u.login);
+        cx.notify();
+      } finally { this.refreshing = false; }
+    });
+  }
+  homeModel() { // live: agents() changes re-render this view by themselves
+    const ps = panes();
+    const repos = this.repos.map(({ root, on, data }) => {
+      const ag = agentsOn(agents(), spaces(), on).map((a) => ({ address: a.address, status: a.status, cwd: ps.find((p) => p.pane === a.pane)?.cwd ?? null }));
+      return { root, on, nwo: data.nwo, tracks: tracks({ worktrees: data.worktrees, docs: data.docs, prs: data.prs ?? [], agents: ag, ages: data.ages, ahead: data.ahead, me: this.me }) }; // this.me: this computer's gh user filters Done
+    });
+    return homeGroups({ repos, ...this.found });
+  }
   needIssues() { const r = this.route(); return r === "backlog" || r === "start"; }
   // One loop per docs/ dir (main root + each linked worktree); the set restarts only when the path list changes. A missing dir rejects: wait and retry while the set is current.
   // watchFolder is this computer only: a remote root watches nothing and the GH_TTL refresh picks up its docs. An empty set still ends the old loops.
@@ -189,28 +250,29 @@ export default class Forge extends View {
 
   // --- actions: every write is an agent's or the person's, never the panel's bookkeeping ---
   // Harness-agnostic: the agent is Herdr's most-picked installed one (knownAgents is ordered that way); no model choice here.
-  async openAgent(path, task, argv) {
-    argv ??= (await knownAgents({ on: this.on })).find((a) => a.installed)?.run ?? ["claude"];
-    const space = spaces().find((s) => s.folder === path && (s.machine ?? null) === this.on); // ponytail: folder match; a space made by Start/worktree mod has exactly this folder
-    if (space) run("tab.new", { space: space.id, argv, task }); else run("space.new", { folder: path, machine: this.on, argv, task });
+  async openAgent(path, task, argv, on = this.on) {
+    argv ??= (await knownAgents({ on })).find((a) => a.installed)?.run ?? ["claude"];
+    const space = spaces().find((s) => s.folder === path && (s.machine ?? null) === (on ?? null)); // ponytail: folder match; a space made by Start/worktree mod has exactly this folder
+    if (space) run("tab.new", { space: space.id, argv, task }); else run("space.new", { folder: path, machine: on ?? "", argv, task });
   }
   openGitHub(url) { exec("open", [url]); }
   openBacklog() { run("tab.new", { name: "Backlog", space: location().space, mod: "forge", props: { view: "backlog", root: this.root, on: this.on } }); }
   openDetail(t) { run("pane.split", { direction: "right", mod: "forge", props: { track: t.path, root: this.root, on: this.on } }); }
-  openStart(issue) { openOverlay({ mod: "forge", props: { view: "start", root: this.root, on: this.on, issue: issue?.number ?? null }, kind: "dialog", width: 720, height: 720 }); }
+  openHome() { run("tab.new", { name: "Forge", mod: "forge", props: { view: "home" } }); }
+  openStart(issue, root = this.root, on = this.on) { openOverlay({ mod: "forge", props: { view: "start", root, on, issue }, kind: "dialog", width: 720, height: 720 }); }
   // The next verb for a track, run by an agent in that worktree.
-  next(t) {
+  next(t, ctx = { root: this.root, on: this.on }) {
     if (!t.path) return { label: "Open PR", go: () => this.openGitHub(t.pr.url) };
     if (t.agents.some((a) => a.status === "blocked")) return { label: "Answer", go: () => run("agent.focus", { terminal: t.agents.find((a) => a.status === "blocked").address }) };
     if (t.agents.some((a) => a.status === "working")) return { label: "Open tab", go: () => run("agent.focus", { terminal: t.agents.find((a) => a.status === "working").address }) };
     if (t.merged) { // Herdr's own Remove worktree dialog closes the space it is given — only when this track has one (mods/worktree/main.js:2 documents {space, folder?, action}); otherwise an agent removes it
-      const sp = spaces().find((s) => s.folder === t.path && (s.machine ?? null) === this.on);
+      const sp = spaces().find((s) => s.folder === t.path && (s.machine ?? null) === (ctx.on ?? null));
       // that dialog can --force, so offer it only for a clean worktree; a dirty one goes to the agent, which never forces
-      return { label: "Remove worktree", go: async () => { const st = sp ? await this.git(["status", "--porcelain"], t.path) : null; return st?.ok && !st.out ? openOverlay({ mod: "worktree", props: { action: "remove", space: sp.id, folder: t.path }, kind: "dialog" })
-        : this.openAgent(this.root, `This branch is merged. Run: git worktree remove "${t.path}" (never --force; if it refuses, say why and stop), then git branch -d ${t.branch} (never -D). Then stop.`); } };
+      return { label: "Remove worktree", go: async () => { const st = sp ? await this.git(["status", "--porcelain"], t.path, ctx.on) : null; return st?.ok && !st.out ? openOverlay({ mod: "worktree", props: { action: "remove", space: sp.id, folder: t.path }, kind: "dialog" })
+        : this.openAgent(ctx.root, `This branch is merged. Run: git worktree remove "${t.path}" (never --force; if it refuses, say why and stop), then git branch -d ${t.branch} (never -D). Then stop.`, undefined, ctx.on); } };
     }
     // /forge:start is the only begin verb: it reads the branch and routes (debug / brainstorm / plan / build / review); the label is for the human.
-    return { label: nextLabel(t), go: () => this.openAgent(t.path, "/forge:start") };
+    return { label: nextLabel(t), go: () => this.openAgent(t.path, "/forge:start", undefined, ctx.on) };
   }
   shelve(t) { this.openAgent(t.path, "/forge:shelve"); }
 
@@ -222,15 +284,67 @@ export default class Forge extends View {
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => fn(cx)); // fn gets a fresh cx: never close over render's
   }
   link(t, id, label, url) { return this.button(t, id, `${label} ↗`, () => this.openGitHub(url)).bg(NONE).text_color(t.ansi12); }
-  groupColor(t, key) { return { needs: t.blocked, flight: t.accent, hold: t.muted, done: t.ansi2 }[key]; }
-  header(t, title, right) {
+  groupColor(t, key) { return { needs: t.blocked, flight: t.accent, hold: t.muted, planned: t.ansi12, done: t.ansi2 }[key]; }
+  header(t, title, right, sub = `${this.repoName()} · ${this.base.replace("origin/", "")}`) {
     return h_flex().px(12).py(8).items_center().gap(8).flex_wrap().border_b(1).border_color(t.border)
       .child(div().font_semibold().text_size(14).child(title))
-      .child(MONO(div()).text_size(11).text_color(t.muted).truncate().min_w(0).child(`${this.repoName()} · ${this.base.replace("origin/", "")}`))
+      .child(MONO(div()).text_size(11).text_color(t.muted).truncate().min_w(0).child(sub))
       .child(h_flex().flex_grow(1).min_w(0).justify_end().items_center().gap(8).flex_wrap().children(right ?? [])); // grows from its content width, so a crowded header wraps this group to a second line
   }
   empty(t, text) { return div().px(8).py(4).text_size(12).text_color(t.dim).child(text); }
 
+  renderHome(cx) {
+    const t = theme(), groups = this.homeModel();
+    const repoCell = (it) => MONO(div()).w(120).flex_none().min_w(0).truncate().text_size(11).text_color(t.muted).child(it.repo);
+    const muted = (text) => MONO(div()).flex_none().text_size(11).text_color(t.muted).child(text);
+    const row = (id) => h_flex().id(id).px(8).py(5).gap(10).items_center().min_w(0).rounded(6).hover((e) => e.bg(t.hover));
+    const focusSpace = (it) => () => { // a row jumps to its worktree's space, opening one if it has none
+      const sp = spaces().find((s) => s.folder === it.path && (s.machine ?? null) === (it.on ?? null));
+      if (sp) run("space.select", { id: sp.id }); else run("space.new", { folder: it.path, machine: it.on ?? "" });
+    };
+    const item = (g, it) => {
+      const color = this.groupColor(t, g.key);
+      if (g.key === "planned") {
+        const key = `${it.repo}-${it.issue.number}`;
+        return row(`h-p-${key}`)
+          .child(repoCell(it))
+          .child(muted(`#${it.issue.number}`))
+          .child(div().flex_1().min_w(0).truncate().child(it.issue.title))
+          .child(muted(it.shelved ? "shelved" : "assigned"))
+          .child(muted(ago(it.at)))
+          .when(it.root, (e) => e.child(this.button(t, `h-ps-${key}`, it.shelved ? "Resume" : "Start", () => this.openStart(it.issue.number, it.root, it.on), true)))
+          .child(this.link(t, `h-pl-${key}`, "", it.issue.url));
+      }
+      const key = `${g.key}-${it.path ?? it.pr.url}`, nx = it.path ? this.next(it, { root: it.root, on: it.on }) : null;
+      return row(`h-${key}`).when(it.path, (e) => e.cursor_pointer().on_click(focusSpace(it)))
+        .child(repoCell(it))
+        .when(g.key === "done", (e) => e
+          .child(muted(`#${it.pr.number}`))
+          .child(div().flex_1().min_w(0).truncate().child(it.pr.title))
+          .child(muted(`merged ${ago(it.at)}`))
+          .child(this.link(t, `h-dl-${key}`, "", it.pr.url)))
+        .when(g.key !== "done", (e) => e
+          .child(MONO(div()).flex_1().min_w(0).truncate().child(it.branch))
+          .child(it.agents.length
+            ? div().px(6).py(1).rounded(9).flex_none().text_size(10.5).bg(alpha(color, "22")).text_color(color).child(chip(it))
+            : muted(`○ no agent · ${it.ahead} ahead · ${ago(it.at)}`))
+          .when(it.progress?.total, (e) => e.child(muted(`${it.progress.done}/${it.progress.total}`)))
+          .when(it.pr, (e) => e.child(this.link(t, `h-pr-${key}`, `PR #${it.pr.number}`, it.pr.url))))
+        .when(nx, (e) => e.child(this.button(t, `h-nx-${key}`, nx.label, nx.go, g.key !== "done")));
+    };
+    return v_flex().id("root").size_full().bg(t.canvas).text_size(13).text_color(t.foreground).on_size_change(this.onSize)
+      .child(this.header(t, "Home", [this.button(t, "start", "+ Start work", () => this.openStart(null, null, null), true)], "all repos"))
+      .when(this.homeErr, (el) => el.child(this.empty(t, this.homeErr)))
+      .children(this.repos.filter((r) => r.error).map((r) => this.empty(t, `${r.root.split("/").pop()}: ${r.error}`)))
+      .child(v_flex().id("home-body").flex_1().min_h(0).overflow_y_scroll().px(12).py(10).gap(16).children(groups.map((g) =>
+        v_flex().gap(2)
+          .child(h_flex().px(8).pb(4).gap(6).items_center()
+            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(`${g.title.toUpperCase()} · ${g.items.length}${g.key === "done" ? DONE_SUFFIX : ""}`)))
+          .children(g.items.length ? g.items.map((it) => item(g, it)) : [this.empty(t, "nothing")])
+          .when(g.key === "planned", (el) => el.child(h_flex().px(8).py(4).gap(8).items_center().flex_wrap().text_size(11.5).text_color(t.muted)
+            .child(div().child("Backlogs:"))
+            .children(this.repos.map((r) => this.button(t, `h-bk-${r.on ?? ""}-${r.root}`, r.root.split("/").pop(), () => run("tab.new", { name: "Backlog", mod: "forge", props: { view: "backlog", root: r.root, on: r.on } })))))))));
+  }
   renderBacklog(cx) {
     const t = theme(), q = this.search.value().trim().toLowerCase(), taken = takenIssues(this.live()), me = this.data.me;
     const labels = (i) => (i.labels ?? []).map((l) => l.name);
@@ -250,12 +364,13 @@ export default class Forge extends View {
         .when(wide, (e) => e.child(cell(150, div().truncate().text_size(11).text_color(t.muted).child(tk ? `in track "${tk}"` : from)))
           .child(cell(90, div().px(6).rounded(9).truncate().text_size(10.5).bg(parked ? alpha(t.accent, "22") : t.border).text_color(parked ? t.ansi12 : t.muted).child(parked ? "agent" : i.author?.login === me ? "you" : i.author?.login ?? ""))))
         .child(cell(32, MONO(div()).text_size(11).text_color(t.muted).child(since(i.createdAt))))
-        .child(cell(56, tk ? div() : this.button(t, `st-${i.number}`, "Start", () => this.openStart(i))));
+        .child(cell(56, tk ? div() : this.button(t, `st-${i.number}`, "Start", () => this.openStart(i.number))));
     };
     return v_flex().id("root").size_full().bg(t.canvas).text_size(13).text_color(t.foreground).on_size_change(this.onSize)
       .child(this.header(t, "Backlog", [
         div().w(240).min_w(140).flex_shrink(1).h(28).px(8).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.surface).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().w_full().text_size(12)),
         ...chips.map(([k, l]) => this.button(t, `f-${k}`, l, (cx) => { this.filter = k; this.shown = 50; cx.notify(); }).when(this.filter === k, (e) => e.bg(t.selection))),
+        this.button(t, "home", "Home", () => this.openHome()),
       ]))
       .when(this.error, (el) => el.child(this.empty(t, this.error)))
       .when(shelved.length, (el) => el.child(v_flex().mx(12).mt(10).p(10).gap(6).rounded(8).bg(t.surface).border(1).border_color(alpha(t.ansi5, "66"))
@@ -264,7 +379,7 @@ export default class Forge extends View {
           .child(this.link(t, `shl-${i.number}`, `#${i.number}`, i.url))
           .child(div().flex_1().min_w(0).truncate().child(i.title))
           .child(MONO(div()).text_size(11).text_color(t.muted).child(since(i.createdAt)))
-          .child(this.button(t, `rs-${i.number}`, "Resume", () => this.openStart(i), true))))))
+          .child(this.button(t, `rs-${i.number}`, "Resume", () => this.openStart(i.number), true))))))
       .child(v_flex().flex_1().overflow_y_scroll().px(12).py(10).gap(1)
         .child(h_flex().px(8).pb(4).gap(10).text_size(10.5).font_semibold().text_color(t.muted)
           .child(cell(64, div().child("ISSUE"))).when(wide, (e) => e.child(cell(72, div().child("KIND")))).child(div().flex_1().min_w(0).child("TITLE")).when(wide, (e) => e.child(cell(150, div().child("PARKED FROM"))).child(cell(90, div().child("BY")))).child(cell(32, div().child("AGE"))).child(cell(56, div())))
@@ -342,7 +457,7 @@ export default class Forge extends View {
       if (this.trackPath()) return pane("This track's worktree is gone (shelved or removed).");
       return pane(div().font_semibold().text_size(14).text_color(t.foreground).child(this.repoName() || "No repo"), "Not in a track.",
         h_flex().gap(8).child(this.button(t, "start", "+ Start work", () => this.openStart(null), true))
-          .child(this.button(t, "home", "Home", () => run("tab.new", { name: "Forge", mod: "forge", props: { view: "home" } }))));
+          .child(this.button(t, "home", "Home", () => this.openHome())));
     }
     const color = this.groupColor(t, tr.group), nx = this.next(tr), gh = this.repoUrl();
     const tabs = [["design", "Design"], ["plan", "Plan"], ["pr", tr.pr ? `PR #${tr.pr.number}${tr.pr.isDraft ? " (draft)" : ""}` : "PR"], ["issues", `Issues (${tr.issues.filter((n) => !this.issueInfo[n]?.pr).length})`]];
@@ -531,7 +646,8 @@ export default class Forge extends View {
       case "start": return this.renderStart(cx);
       case "track": return this.renderDetail(cx);
       case "backlog": return this.renderBacklog(cx);
-      default: return this.renderMoved(); // home too, until Task 5 points it at renderHome
+      case "home": return this.renderHome(cx);
+      default: return this.renderMoved();
     }
   }
   renderMoved() {
