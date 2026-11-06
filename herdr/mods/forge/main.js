@@ -102,7 +102,7 @@ export default class Forge extends View {
         this.data = { worktrees: r.worktrees, docs: r.docs, prs: r.prs ?? this.data.prs, issues, ages: r.ages, ahead: r.ahead, me, repoUrl: r.repoUrl, nwo: r.nwo };
         this.error = r.prs ? null : "gh unavailable — PRs may be stale";
         this.fetched = Date.now();
-        if (props()?.track) this.loadDoc(cx, !!this.on); // the detail pane's first load: track() is null until this data exists; remote: re-read every tick (no folder watch)
+        if (this.route() === "track") { this.loadDoc(cx, !!this.on); if (this.tab === "issues") this.fetchIssues(cx); } // the detail pane's first load: track() is null until this data exists; remote: re-read every tick (no folder watch)
         cx.notify();
       } finally { if (seq === this.seq) this.refreshing = false; } // a superseded refresh must not clear the newer one's flag
     });
@@ -151,7 +151,27 @@ export default class Forge extends View {
     const ag = agentsOn(agents(), spaces(), this.on).map((a) => ({ address: a.address, status: a.status, cwd: ps.find((p) => p.pane === a.pane)?.cwd ?? null }));
     return tracks({ ...this.data, agents: ag });
   }
-  track() { return this.live().find((t) => t.path === props().track) ?? null; }
+  // Start passes props.track. A key-opened pane (props {view:"track"}) resolves once from where the person was (this.here)
+  // and remembers it in this copy's localStorage (per copy — verified live), so a restart with focus elsewhere keeps it.
+  // ponytail: a cached one-time resolution, not tracked state; if it names a removed worktree the pane says so.
+  trackPath() {
+    if (props()?.track) return props().track;
+    if (this.pinned) return this.pinned;
+    const saved = localStorage.getItem("forge.track");
+    if (saved) return (this.pinned = saved);
+    const p = trackFor(this.data.worktrees, this.here?.cwd);
+    if (p) { this.pinned = p; localStorage.setItem("forge.track", p); }
+    return p;
+  }
+  track() { const p = this.trackPath(); return p ? this.live().find((t) => t.path === p) ?? null : null; } // tracks() also holds PR-only Done items with path null: never match those
+  async fetchIssues(cx) {
+    const tr = this.track(); if (!tr) return;
+    for (const n of tr.issues) { // sequential: remote exec rule
+      const i = await this.cachedGh(`issue:${this.on ?? ""}:${this.root}:${n}`, ["issue", "view", String(n), "--json", "number,title,url,state"], this.root, this.on);
+      this.issueInfo[n] = i === null ? { failed: true } : i.url?.includes("/issues/") ? i : { pr: true }; // gh issue view resolves PR numbers too
+    }
+    cx.notify();
+  }
   narrow(px) { return this.w > 0 && this.w < px; } // false until the first layout reports a width
   repoName() { return (this.root ?? "").split("/").pop(); }
   // That machine's home: Herdr's worktree path rule is ~/.herdr/worktrees/<repo>/<branch-with-dashes> on the space's machine. Pattern: mods/worktree/main.js:136.
@@ -250,10 +270,11 @@ export default class Forge extends View {
           .when(rows.length > this.shown, (e) => e.child(this.button(t, "more", "Load 50 more", (cx) => { this.shown += 50; cx.notify(); })))));
   }
   initDetail(cx) {
-    this.tab = "design"; this.docs = {}; this.editing = false; this.editor = null; this.saveMsg = null; this.log = []; this.reloading = false;
+    this.tab = "design"; this.docs = {}; this.editing = false; this.editor = null; this.saveMsg = null; this.log = []; this.reloading = false; this.issueInfo = {}; this.prBody = null;
     cx.spawn(async (cx) => { if (this.on) return; // a remote track: refresh() (GH_TTL timer) reloads it
+      while (!this.trackPath()) await cx.sleep(1000); // a key-opened pane has no path until refresh() has the worktrees
       for (;;) {
-      try { await watchFolder(`${props().track}/docs`); } catch { if (this.data.worktrees.length && !this.track()) return; await cx.sleep(5000); continue; }
+      try { await watchFolder(`${this.trackPath()}/docs`); } catch { if (this.data.worktrees.length && !this.track()) return; await cx.sleep(5000); continue; }
       if (!this.editing) { this.docs = {}; this.loadDoc(cx); }
     } }); // ends only when the worktree is gone (a missing docs/ retries every 5 s); while editing, save() reconciles instead
     this.loadDoc(cx);
@@ -311,11 +332,24 @@ export default class Forge extends View {
   }
   renderDetail(cx) {
     const t = theme(), tr = this.track();
-    if (!tr) return v_flex().id("root").size_full().bg(t.surface).p(12).gap(8).text_color(t.dim).child(this.data.worktrees.length ? "This track's worktree is gone (shelved or removed)." : "loading…");
+    if (!tr) {
+      const pane = (...kids) => v_flex().id("root").size_full().bg(t.surface).p(12).gap(8).text_color(t.dim).children(kids);
+      if (!this.data.worktrees.length) return pane(this.error ?? "loading…");
+      if (this.trackPath()) return pane("This track's worktree is gone (shelved or removed).");
+      return pane(div().font_semibold().text_size(14).text_color(t.foreground).child(this.repoName() || "No repo"), "Not in a track.",
+        h_flex().gap(8).child(this.button(t, "start", "+ Start work", () => this.openStart(null), true))
+          .child(this.button(t, "home", "Home", () => run("tab.new", { name: "Forge", mod: "forge", props: { view: "home" } }))));
+    }
     const color = this.groupColor(t, tr.group), nx = this.next(tr), gh = this.repoUrl();
-    const tabs = [["design", "Design"], ["plan", "Plan"], ["pr", tr.pr ? `PR #${tr.pr.number}${tr.pr.isDraft ? " (draft)" : ""}` : "PR"], ["issues", `Issues (${tr.issues.length})`]];
+    const tabs = [["design", "Design"], ["plan", "Plan"], ["pr", tr.pr ? `PR #${tr.pr.number}${tr.pr.isDraft ? " (draft)" : ""}` : "PR"], ["issues", `Issues (${tr.issues.filter((n) => !this.issueInfo[n]?.pr).length})`]];
     const tabEl = (k, l) => div().id(`t-${k}`).flex_none().px(10).py(7).text_size(12.5).cursor_pointer().border_b(2).border_color(this.tab === k ? t.accent : NONE).text_color(this.tab === k ? t.foreground : t.muted).child(l)
-      .on_click((_e, cx) => { if (this.editing) return; this.tab = k; cx.notify(); });
+      .on_click((_e, cx) => {
+        if (this.editing) return;
+        this.tab = k;
+        if (k === "issues") cx.spawn((cx) => this.fetchIssues(cx));
+        if (k === "pr" && tr.pr) { const n = tr.pr.number; cx.spawn(async (cx) => { const r = await this.cachedGh(`prbody:${this.on ?? ""}:${this.root}:${n}`, ["pr", "view", String(n), "--json", "body"], this.root, this.on); if (r) { this.prBody = { n, body: r.body }; cx.notify(); } }); }
+        cx.notify();
+      });
     const doc = (key) => {
       const d = this.docs[key];
       if (!tr[key]) return v_flex().p(12).gap(8).child(div().text_color(t.dim).child(`no ${key} on this branch yet`)).child(this.button(t, `mk-${key}`, key === "design" ? "Brainstorm" : "Plan", () => this.openAgent(tr.path, "/forge:start"), true));
@@ -339,12 +373,12 @@ export default class Forge extends View {
     const prTab = () => !tr.pr ? this.empty(t, "no PR yet — the build opens a draft PR as its first step")
       : v_flex().flex_1().min_h(0).px(16).py(12).gap(8)
         .child(h_flex().gap(8).items_center().child(div().font_semibold().flex_1().min_w(0).truncate().child(tr.pr.title)).child(div().text_size(11).text_color(t.muted).child(tr.pr.state.toLowerCase())).child(this.link(t, "prgh", "Open on GitHub", tr.pr.url)))
-        .child(TextView.markdown("pr-body", tr.pr.body ?? "").selectable().scrollable());
-    const issuesTab = () => v_flex().p(8).gap(2).children(tr.issues.length ? tr.issues.map((n) => {
-      const i = this.data.issues.find((x) => x.number === n);
+        .child(TextView.markdown("pr-body", (this.prBody?.n === tr.pr.number ? this.prBody.body : tr.pr.body) ?? "").selectable().scrollable());
+    const issuesTab = () => v_flex().p(8).gap(2).children(tr.issues.length ? tr.issues.filter((n) => !this.issueInfo[n]?.pr).map((n) => {
+      const i = this.issueInfo[n];
       return h_flex().id(`li-${n}`).px(8).py(6).rounded(6).gap(8).items_center().hover((e) => e.bg(t.hover))
         .child(MONO(div()).text_size(11).text_color(t.muted).child(`#${n}`))
-        .child(div().flex_1().min_w(0).truncate().child(i?.title ?? "(closed or not loaded)"))
+        .child(div().flex_1().min_w(0).truncate().text_color(i?.state === "CLOSED" || !i || i.failed ? t.dim : t.foreground).child(!i ? "loading…" : i.failed ? "couldn't load" : i.title))
         .child(this.link(t, `ligh-${n}`, "Open on GitHub", i?.url ?? `${gh}/issues/${n}`));
     }) : [this.empty(t, "no linked issues")]);
     const slim = this.narrow(720); // below this the rail goes: reason + Next move under the header
