@@ -354,7 +354,8 @@ export default class Forge extends View {
       .when(this.homeErr, (el) => el.child(this.empty(t, this.homeErr)))
       .children(this.repos.filter((r) => r.error).map((r) => this.empty(t, `${label(r.root.split("/").pop(), r.on)}: ${r.error}`)))
       .when(!this.loaded && !this.repos.length, (el) => el.child(this.empty(t, "loading…")))
-      .when(this.loaded || this.repos.length, (el) => el.child(v_flex().id("home-body").flex_1().min_h(0).overflow_y_scroll().px(12).py(10).gap(16).children(groups.map((g) =>
+      .when(this.loaded || this.repos.length, (el) => el.child(v_flex().id("home-body").flex_1().min_h(0).overflow_y_scroll().px(12).py(10).gap(16).children(groups.filter((g) => this.loaded || g.key !== "done").map((g) => // Done needs this.meBy: hidden until the first load ends
+
         v_flex().gap(2)
           .child(h_flex().px(8).pb(4).gap(6).items_center()
             .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(`${g.title.toUpperCase()} · ${g.items.length}${g.key === "done" ? DONE_SUFFIX : ""}`)))
@@ -409,7 +410,7 @@ export default class Forge extends View {
   initDetail(cx) {
     this.tab = "design"; this.docs = {}; this.editing = false; this.editor = null; this.saveMsg = null; this.log = []; this.reloading = false; this.issueInfo = {}; this.prBody = null;
     cx.spawn(async (cx) => { if (this.on) return; // a remote track: refresh() (GH_TTL timer) reloads it
-      while (!this.trackPath()) { if (this.data.worktrees.length || this.error) return; await cx.sleep(1000); } // a key-opened pane has no path until refresh() has the worktrees; loaded and still none: not in a track, nothing will change that
+      while (!this.trackPath()) { if (this.data.worktrees.length || (this.error && !this.root)) return; await cx.sleep(1000); } // a key-opened pane has no path until refresh() has the worktrees; loaded and still none: not in a track, nothing will change that
       for (;;) {
       try { await watchFolder(`${this.trackPath()}/docs`); } catch { if (this.data.worktrees.length && !this.track()) return; await cx.sleep(5000); continue; }
       if (!this.editing) { this.docs = {}; this.loadDoc(cx); }
