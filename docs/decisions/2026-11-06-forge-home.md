@@ -66,3 +66,7 @@ Groups reuse `grouped()`. Waiting on you = agent blocked or PR ready for review.
 ## Open questions
 
 None blocking. Verified live on 2026-11-06 with a throwaway probe mod: `mod.open` passes `props()` = `{overlay: "<id>"}` (no `view`); a `place: "none"` mod opens through `tab.new` and `pane.split`; `localStorage` is per mod copy. Not verified: whether `localStorage` survives an app restart (the plan has a fallback).
+
+## Deviations
+
+- T1 commit d8603b0 — deviation: none. Review: p2 null-nwo leaves track issues untaken → fixed in T2 (loadRepo keeps prev.nwo); p3s ruled no-change (future closedAt = clock skew, Done on:null unused, >30-merged dedupe gap, idle-agent hold rank, same repo on two machines) — parked: none
