@@ -217,3 +217,14 @@ export function homeGroups({ repos = [], assigned = [], shelved = [], merged = [
   items.done.sort((a, b) => b.at - a.at);
   return HOME_GROUPS.map(([key, title]) => ({ key, title, items: items[key] }));
 }
+
+// How long a gh cache entry counts as fresh: its base ttl, stretched to 1/20 of how long its data has gone unchanged, up to QUIET_CAP.
+// Quiet 1 h → 3 min; 10 h or more → 30 min. A base ttl above the cap (identity: a day) is never shortened.
+export const QUIET_CAP = 30 * 60000;
+export function cacheLife(ttl, since, now) { return since != null ? Math.max(ttl, Math.min(QUIET_CAP, (now - since) / 20)) : ttl; }
+// The newest timestamp in a gh list (PRs: updatedAt/mergedAt; search hits: closedAt/createdAt), or null: seeds a new entry's quiet time.
+export function newest(list) {
+  if (!Array.isArray(list)) return null;
+  const ts = list.map((x) => Date.parse(x?.updatedAt ?? x?.mergedAt ?? x?.closedAt ?? x?.createdAt)).filter((n) => n > 0);
+  return ts.length ? Math.max(...ts) : null;
+}

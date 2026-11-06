@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS, slimPr, trackFor, HOME_GROUPS, homeGroups, drafts } from "./model.js";
+import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS, slimPr, trackFor, HOME_GROUPS, homeGroups, drafts, cacheLife, newest, QUIET_CAP } from "./model.js";
 
 const WT = "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\nworktree /r/.claude/worktrees/ring\nHEAD bbb\nbranch refs/heads/feat/ring\n\nworktree /h/.herdr/worktrees/r/fix-login\nHEAD ccc\ndetached\n\nworktree /gone\nHEAD ddd\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n";
 
@@ -302,4 +302,19 @@ test("homeGroups: a merged PR with a worktree on one machine beats the other mac
   const repos = [{ root: "/code/x", on: null, nwo: "o/x", tracks: [prOnly] }, { root: "/code/x", on: "mbp", nwo: "o/x", tracks: [withWt] }];
   const done = homeGroups({ repos }).find((g) => g.key === "done").items;
   assert.deepEqual(done.map((i) => [i.pr.number, i.on, i.path]), [[5, "mbp", "/w/x-5"]]);
+});
+
+test("cacheLife stretches with quiet time, capped, never below the base ttl", () => {
+  const m = 60000, h = 60 * m;
+  assert.equal(cacheLife(m, null, 0), m);
+  assert.equal(cacheLife(m, 0, 10 * m), m); // quiet 10 min: still the base
+  assert.equal(cacheLife(m, 0, h), 3 * m);
+  assert.equal(cacheLife(m, 0, 90 * 24 * h), QUIET_CAP);
+  assert.equal(cacheLife(24 * h, 0, 90 * 24 * h), 24 * h); // a day-long ttl is never cut to the cap
+});
+
+test("newest picks the latest timestamp in a gh list, else null", () => {
+  assert.equal(newest([{ updatedAt: "2026-01-01T00:00:00Z" }, { closedAt: "2026-03-01T00:00:00Z" }, { createdAt: "bad" }]), Date.parse("2026-03-01T00:00:00Z"));
+  assert.equal(newest([]), null);
+  assert.equal(newest({ login: "x" }), null);
 });

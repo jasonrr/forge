@@ -5,7 +5,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
 import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, setShared, shared } from "herdr";
 import { writeFile, mkdir, readdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app, reads under home (AGENTS.md "Other built-ins")
-import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, branchFor, shelfBranch, slimPr, trackFor, homeGroups, drafts, DONE_WINDOW_MS } from "./model.js";
+import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, branchFor, shelfBranch, slimPr, trackFor, homeGroups, drafts, DONE_WINDOW_MS, cacheLife, newest } from "./model.js";
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const PR_FIELDS = "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author";
@@ -66,13 +66,14 @@ export default class Forge extends View {
   // The 1 s slack keeps a timer that fires every ttl from always landing just inside the window (it would double the real interval).
   // Stores map(data) so big payloads are slimmed first. A failed call returns the last good data (stale beats empty), else null.
   // ponytail: two views expiring together both fetch once; harmless at this rate.
-  async cachedGh(key, args, cwd, on, ttl = GH_TTL, map = (x) => x) {
-    const k = `forge.gh.${key}`, hit = shared(k);
-    if (hit && Date.now() - hit.at < ttl - 1000) return hit.data;
+  // `since`: when the data last changed (an entry without one yet: its newest item). Data quiet for long stays fresh longer (cacheLife); quiet = false keeps the base ttl.
+  async cachedGh(key, args, cwd, on, ttl = GH_TTL, map = (x) => x, quiet = true) {
+    const k = `forge.gh.${key}`, hit = shared(k), now = Date.now();
+    if (hit && now - hit.at < cacheLife(ttl, quiet ? hit.since : null, now) - 1000) return hit.data;
     const data = await this.gh(args, cwd, on);
     if (data === null) return hit?.data ?? null;
-    const v = map(data);
-    setShared(k, { at: Date.now(), data: v });
+    const v = map(data), same = hit && JSON.stringify(hit.data) === JSON.stringify(v);
+    setShared(k, { at: now, data: v, since: hit?.since != null && same ? hit.since : hit?.since != null ? now : newest(v) ?? now }); // no since yet (new or pre-quiet entry): seed from the newest item
     return v;
   }
 
@@ -145,8 +146,9 @@ export default class Forge extends View {
     const st = await git(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all", "--", "docs/decisions", "docs/plans"]);
     const dr = st.ok ? drafts(st.out) : (prev.drafts ?? []); // could not run ≠ no drafts
     const key = `${on ?? ""}:${root}`, pl = (state, limit) => ["pr", "list", "--state", state, "--limit", String(limit), "--json", PR_FIELDS];
-    const calls = [() => this.cachedGh(`pr-open:${key}`, pl("open", 100), root, on, GH_TTL, (ps) => ps.map(slimPr)),
-      () => this.cachedGh(`pr-merged:${key}`, [...pl("merged", 30), "--author", "@me"], root, on, GH_TTL, (ps) => ps.map(slimPr)),
+    const busy = Object.values(ages).some((t) => Date.now() / 1000 - t < 86400); // a commit in a linked worktree today: PRs may open or merge any minute, so no quiet stretch
+    const calls = [() => this.cachedGh(`pr-open:${key}`, pl("open", 100), root, on, GH_TTL, (ps) => ps.map(slimPr), !busy),
+      () => this.cachedGh(`pr-merged:${key}`, [...pl("merged", 30), "--author", "@me"], root, on, GH_TTL, (ps) => ps.map(slimPr), !busy),
       () => this.cachedGh(`repo:${key}`, ["repo", "view", "--json", "url,nameWithOwner"], root, on, DAY)];
     const [open, done, id] = on ? await oneByOne(calls) : await Promise.all(calls.map((f) => f())); // sequential on a remote: remote exec rule
     const prs = open && done ? [...open, ...done] : null; // tracks() ignores CLOSED; an OPEN PR on a reused branch still wins (model.js)
