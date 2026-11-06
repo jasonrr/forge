@@ -1,5 +1,5 @@
 // forge: the dev-loop's work, one track per worktree of the shown repo. Views in one mod, chosen by route() from props():
-// Home {view:"home"}; track pane {view:"track"} or {track}; backlog {view:"backlog"}; Start ({view:"start"} or the mod.open overlay); and the "moved" notice for an old docked block. No stored state: everything is derived
+// Home {view:"home"}; track pane {view:"track"} or {track}; backlog {view:"backlog"}; Start ({view:"start"} or the mod.open overlay); and the "moved" notice for an old docked block. Stored state: only the track pin (localStorage) and the shared gh cache (shared()); everything else is derived
 // from git worktrees, the docs on each branch, gh PRs/issues and the host's agents.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
@@ -11,7 +11,7 @@ const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const PR_FIELDS = "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author";
 const GH_TTL = 60000; // gh results are cached across all forge views for this long (shared()); GraphQL budget: 5000 pts/h per user
 const DAY = 86400000;
-const DONE_SUFFIX = ` · ${DONE_WINDOW_MS / 86400000} DAYS`;
+const DONE_SUFFIX = ` · ${DONE_WINDOW_MS / DAY} DAYS`;
 const MONO = (el) => el.font_family(settings().font_family); // the terminal's mono font (AGENTS.md: settings().font_family)
 const ago = (sec) => { const d = Math.max(0, Date.now() / 1000 - sec); return d < 3600 ? `${Math.floor(d / 60)}m` : d < 86400 ? `${Math.floor(d / 3600)}h` : `${Math.floor(d / 86400)}d`; };
 const since = (iso) => ago(Date.parse(iso) / 1000);
@@ -25,7 +25,7 @@ function location() {
   if (!space) return {}; // its machine's layout is loading: no cwd, so nothing runs locally on a remote path
   const all = panes(), pane = f?.pane ? all.find((p) => p.pane === f.pane) : null;
   const sibling = f?.tab ? all.find((p) => p.tab === f.tab && p.cwd) : null;
-  return { cwd: pane?.cwd || f?.cwd || sibling?.cwd || space?.folder, space: space?.id, machine: space?.machine ?? null };
+  return { cwd: pane?.cwd || f?.cwd || sibling?.cwd || space?.folder, machine: space?.machine ?? null };
 }
 
 const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, ahead: {}, me: null, repoUrl: null, nwo: null, drafts: [] });
@@ -134,8 +134,9 @@ export default class Forge extends View {
       const designText = design ? (await readTextFile(`${w.path}/${design}`, { on }).catch(() => "")) ?? "" : "";
       // (a pruned worktree never gets here: parseWorktrees drops `prunable` blocks)
       docs[w.path] = { design, plan, designText };
-      ages[w.path] = Number((await git(["log", "-1", "--format=%ct"], w.path)).out) || 0;
-      ahead[w.path] = Number((await git(["rev-list", "--count", `${base}..HEAD`], w.path)).out) || 0;
+      const lg = await git(["log", "-1", "--format=%ct"], w.path), rl = await git(["rev-list", "--count", `${base}..HEAD`], w.path);
+      ages[w.path] = lg.failed ? prev.ages[w.path] ?? 0 : Number(lg.out) || 0; // a rejected exec keeps what we had
+      ahead[w.path] = rl.failed ? prev.ahead[w.path] ?? 0 : Number(rl.out) || 0;
     };
     const ws = wt.filter((w) => !w.main);
     if (on) { for (const w of ws) await one(w); } else await Promise.all(ws.map(one)); // ponytail: sequential on a remote — hc runs at most 16 execs per machine and every open view refreshes on its own
@@ -178,7 +179,8 @@ export default class Forge extends View {
           const prev = this.repos.find((r) => r.root === root && r.on === on)?.data ?? emptyData();
           if (stale) { out.push({ root, on, data: prev, error: `can't reach ${on} — showing the last data` }); continue; }
           const r = await this.loadRepo(root, on, prev);
-          out.push({ root, on, data: r.ok ? r : prev, error: r.ok ? null : r.error });
+          out.push({ root, on, data: r.ok ? { ...r, prs: r.prs ?? prev.prs } : prev, error: r.ok ? null : r.error });
+          if (!this.loaded) { this.repos = [...out]; cx.notify(); } // first load: show each repo as it arrives
         }
         const sinceDay = new Date(Date.now() - DONE_WINDOW_MS).toISOString().slice(0, 10);
         const search = (key, args) => this.cachedGh(key, ["search", ...args], home(), null);
@@ -229,7 +231,7 @@ export default class Forge extends View {
     const saved = this.savedPin();
     if (saved) return (this.pinned = saved.path);
     const p = trackFor(this.data.worktrees, this.here?.cwd);
-    if (p) { this.pinned = p; localStorage.setItem("forge.track", JSON.stringify({ path: p, on: this.on })); }
+    if (p) { this.pinned = p; try { localStorage.setItem("forge.track", JSON.stringify({ path: p, on: this.on })); } catch {} } // storage unavailable: the pin lives in this.pinned only
     return p;
   }
   track() { const p = this.trackPath(); return p ? this.live().find((t) => t.path === p) ?? null : null; } // tracks() also holds PR-only Done items with path null: never match those
@@ -260,8 +262,6 @@ export default class Forge extends View {
     if (space) run("tab.new", { space: space.id, argv, task }); else run("space.new", { folder: path, machine: on ?? "", argv, task });
   }
   openGitHub(url) { exec("open", [url]); }
-  openBacklog() { run("tab.new", { name: "Backlog", space: location().space, mod: "forge", props: { view: "backlog", root: this.root, on: this.on } }); }
-  openDetail(t) { run("pane.split", { direction: "right", mod: "forge", props: { track: t.path, root: this.root, on: this.on } }); }
   openHome() { run("tab.new", { name: "Forge", mod: "forge", props: { view: "home" } }); }
   openStart(issue, root = this.root, on = this.on) { openOverlay({ mod: "forge", props: { view: "start", root, on, issue }, kind: "dialog", width: 720, height: 720 }); }
   // The next verb for a track, run by an agent in that worktree.
@@ -353,8 +353,8 @@ export default class Forge extends View {
       .child(this.header(t, "Home", [this.button(t, "start", "+ Start work", () => this.openStart(null, null, null), true)], "all repos"))
       .when(this.homeErr, (el) => el.child(this.empty(t, this.homeErr)))
       .children(this.repos.filter((r) => r.error).map((r) => this.empty(t, `${label(r.root.split("/").pop(), r.on)}: ${r.error}`)))
-      .when(!this.loaded, (el) => el.child(this.empty(t, "loading…")))
-      .when(this.loaded, (el) => el.child(v_flex().id("home-body").flex_1().min_h(0).overflow_y_scroll().px(12).py(10).gap(16).children(groups.map((g) =>
+      .when(!this.loaded && !this.repos.length, (el) => el.child(this.empty(t, "loading…")))
+      .when(this.loaded || this.repos.length, (el) => el.child(v_flex().id("home-body").flex_1().min_h(0).overflow_y_scroll().px(12).py(10).gap(16).children(groups.map((g) =>
         v_flex().gap(2)
           .child(h_flex().px(8).pb(4).gap(6).items_center()
             .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(`${g.title.toUpperCase()} · ${g.items.length}${g.key === "done" ? DONE_SUFFIX : ""}`)))
@@ -409,7 +409,7 @@ export default class Forge extends View {
   initDetail(cx) {
     this.tab = "design"; this.docs = {}; this.editing = false; this.editor = null; this.saveMsg = null; this.log = []; this.reloading = false; this.issueInfo = {}; this.prBody = null;
     cx.spawn(async (cx) => { if (this.on) return; // a remote track: refresh() (GH_TTL timer) reloads it
-      while (!this.trackPath()) { if (this.data.worktrees.length) return; await cx.sleep(1000); } // a key-opened pane has no path until refresh() has the worktrees; loaded and still none: not in a track, nothing will change that
+      while (!this.trackPath()) { if (this.data.worktrees.length || this.error) return; await cx.sleep(1000); } // a key-opened pane has no path until refresh() has the worktrees; loaded and still none: not in a track, nothing will change that
       for (;;) {
       try { await watchFolder(`${this.trackPath()}/docs`); } catch { if (this.data.worktrees.length && !this.track()) return; await cx.sleep(5000); continue; }
       if (!this.editing) { this.docs = {}; this.loadDoc(cx); }
@@ -471,10 +471,10 @@ export default class Forge extends View {
     const t = theme(), tr = this.track();
     if (!tr) {
       const pane = (...kids) => v_flex().id("root").size_full().bg(t.surface).p(12).gap(8).text_color(t.dim).children(kids);
-      if (!this.data.worktrees.length) return pane(this.error ?? "loading…");
-      if (this.trackPath()) return pane("This track's worktree is gone (shelved or removed).");
+      if (!this.data.worktrees.length && !this.error) return pane("loading…");
+      if (this.trackPath() && this.data.worktrees.length) return pane("This track's worktree is gone (shelved or removed).");
       const here = this.data.drafts ?? [];
-      return pane(div().font_semibold().text_size(14).text_color(t.foreground).child(this.repoName() || "No repo"), "Not in a track.",
+      return pane(div().font_semibold().text_size(14).text_color(t.foreground).child(this.repoName() || "No repo"), this.data.worktrees.length ? "Not in a track." : this.error,
         ...(here.length ? [div().text_size(12).text_color(t.muted).child("Drafts here (not dispatched yet)"), ...here.map((d) => {
           const ds = this.draftStart(d, this.root, this.on);
           return h_flex().gap(8).items_center().min_w(0)
@@ -492,7 +492,7 @@ export default class Forge extends View {
         if (this.editing) return;
         this.tab = k;
         if (k === "issues") cx.spawn((cx) => this.fetchIssues(cx));
-        if (k === "pr" && tr.pr) { const n = tr.pr.number; cx.spawn(async (cx) => { const r = await this.cachedGh(`prbody:${this.on ?? ""}:${this.root}:${n}`, ["pr", "view", String(n), "--json", "body"], this.root, this.on); if (r) { this.prBody = { n, body: r.body }; cx.notify(); } }); }
+        if (k === "pr" && tr.pr) { const n = tr.pr.number; cx.spawn(async (cx) => { const r = await this.cachedGh(`prbody:${this.on ?? ""}:${this.root}:${n}`, ["pr", "view", String(n), "--json", "body"], this.root, this.on); this.prBody = r ? { n, body: r.body } : { n, body: null, failed: true }; cx.notify(); }); }
         cx.notify();
       });
     const doc = (key) => {
@@ -518,7 +518,8 @@ export default class Forge extends View {
     const prTab = () => !tr.pr ? this.empty(t, "no PR yet — the build opens a draft PR as its first step")
       : v_flex().flex_1().min_h(0).px(16).py(12).gap(8)
         .child(h_flex().gap(8).items_center().child(div().font_semibold().flex_1().min_w(0).truncate().child(tr.pr.title)).child(div().text_size(11).text_color(t.muted).child(tr.pr.state.toLowerCase())).child(this.link(t, "prgh", "Open on GitHub", tr.pr.url)))
-        .child(TextView.markdown("pr-body", (this.prBody?.n === tr.pr.number ? this.prBody.body : tr.pr.body) ?? "").selectable().scrollable());
+        .when(this.prBody?.n === tr.pr.number && this.prBody.failed, (e) => e.child(div().text_size(11).text_color(t.muted).child("couldn't load the full description")))
+        .child(TextView.markdown("pr-body", (this.prBody?.n === tr.pr.number && !this.prBody.failed ? this.prBody.body : tr.pr.body) ?? "").selectable().scrollable());
     const issuesTab = () => v_flex().p(8).gap(2).children(tr.issues.length ? tr.issues.filter((n) => !this.issueInfo[n]?.pr).map((n) => {
       const i = this.issueInfo[n];
       return h_flex().id(`li-${n}`).px(8).py(6).rounded(6).gap(8).items_center().hover((e) => e.bg(t.hover))
@@ -696,7 +697,6 @@ export default class Forge extends View {
     const t = theme();
     return v_flex().id("root").size_full().bg(t.surface).p(12).gap(6)
       .child(div().child("Forge moved out of the dock."))
-      .child(div().text_color(t.muted).child("⌘⇧H Home · ⌘⇧N Start work · ⌘⇧J this worktree's track"))
-      .child(div().text_color(t.muted).child("Hide this block: run scripts/install-herdr-mod.sh — it prints the command."));
+      .child(div().text_color(t.muted).child("Run scripts/install-herdr-mod.sh: it adds keys for Home, Start work and the track pane, and prints the command to hide this block."));
   }
 }

@@ -1,6 +1,5 @@
 // Pure derivation: the panel is a function of git worktrees, the docs on each branch, gh
 // PRs/issues and the host's agents. No herdr import, so `node --test` runs it.
-export const GROUPS = [["needs", "Needs you"], ["flight", "In flight"], ["hold", "On hold"], ["done", "Done"]];
 export const DONE_WINDOW_MS = 7 * 86400 * 1000; // merged PRs stay under Done this long after their worktree is gone — gh is the memory, nothing is stored
 
 // `git worktree list --porcelain`: blocks of "worktree <path>\nHEAD <sha>\n(branch refs/heads/x|detached)"; the first block is the main checkout.
@@ -61,7 +60,7 @@ function group(t) {
   return "hold";
 }
 
-// The card's one line: what the agent says it is doing; without one, the facts on disk.
+// The Home row's / track pane's one line: what the agent says it is doing; without one, the facts on disk.
 const lead = (t) => t.agents.find((x) => x.status === "blocked") ?? t.agents.find((x) => x.status === "working") ?? t.agents[0] ?? null;
 function reason(t) {
   const a = lead(t);
@@ -74,7 +73,7 @@ function reason(t) {
   return `${who} · ${t.ahead} commit${t.ahead === 1 ? "" : "s"} ahead · ${pr}`;
 }
 
-export function chip(t) { const a = lead(t); return a && (a.status === "blocked" || a.status === "working") ? a.status : t.merged ? "merged" : a?.status ?? "no agent"; } // the card's status chip: the agent that decides the group, else merged
+export function chip(t) { const a = lead(t); return a && (a.status === "blocked" || a.status === "working") ? a.status : t.merged ? "merged" : a?.status ?? "no agent"; } // the Home row's status chip: the agent that decides the group, else merged
 
 // The action button's label: the forge verb the branch is at. The PR decides first (docs vanish from `diff base...HEAD` after a rebase onto
 // merged docs, and fix/ branches never have any); then which docs exist. /forge:start routes by itself; this is for the human.
@@ -127,13 +126,6 @@ export function agentsOn(agents, spaces, on) {
   return agents.filter((a) => m.has(a.space) && m.get(a.space) === (on ?? null));
 }
 
-export function grouped(ts) {
-  return GROUPS.map(([key, title]) => {
-    const items = ts.filter((t) => t.group === key).sort((a, b) => (key === "hold" ? a.at - b.at : b.at - a.at));
-    return { key, title, items };
-  });
-}
-
 // issue number -> slug of the track that references it (greyed in Start work).
 export function takenIssues(ts) {
   const m = new Map();
@@ -161,7 +153,7 @@ export function isParked(issue) {
 }
 
 // The shared gh cache persists to shared.json on every write: keep only the body lines the panel reads —
-// checklist boxes (progress, planTasks ticks) and lines with #refs (linked issues). The PR tab fetches the full body on demand (Task 4).
+// checklist boxes (progress, planTasks ticks) and lines with #refs (linked issues). The PR tab fetches the full body on demand.
 export function slimPr(p) {
   const body = (p.body ?? "").split("\n").filter((l) => /^\s*- \[[ xX]\]|#\d+/.test(l)).join("\n");
   return { ...p, body };
@@ -175,9 +167,6 @@ export function trackFor(worktrees, cwd) {
 }
 
 export const HOME_GROUPS = [["needs", "Waiting on you"], ["flight", "In flight"], ["planned", "Planned"], ["done", "Done"]];
-// Home across repos. repos: [{root, on, nwo, tracks, drafts?}] with tracks from tracks(). assigned/shelved: `gh search issues` rows
-// ({repository:{name,nameWithOwner}, number, title, url, labels, createdAt}). merged: `gh search prs --merged-at` rows
-// ({repository, number, title, url, closedAt}; search has no mergedAt, and closedAt is the merge time for a merged PR).
 // New, uncommitted design/plan files in a checkout (`git status --porcelain --untracked-files=all -- docs/decisions docs/plans`):
 // the work brainstorm/plan are writing before a worktree exists. Only new files (?? or A); an edit to a committed doc is not a draft.
 export function drafts(porcelain) {
@@ -191,6 +180,9 @@ export function drafts(porcelain) {
   return [...by.values()];
 }
 
+// Home across repos. repos: [{root, on, nwo, tracks, drafts?}] with tracks from tracks(). assigned/shelved: `gh search issues` rows
+// ({repository:{name,nameWithOwner}, number, title, url, labels, createdAt}). merged: `gh search prs --merged-at` rows
+// ({repository, number, title, url, closedAt}; search has no mergedAt, and closedAt is the merge time for a merged PR).
 export function homeGroups({ repos = [], assigned = [], shelved = [], merged = [], now = Date.now() }) {
   const items = { needs: [], flight: [], planned: [], done: [] };
   const taken = new Set(), seenPr = new Set(), byNwo = new Map(repos.filter((r) => r.nwo).sort((a, b) => (a.on == null) - (b.on == null)).map((r) => [r.nwo, r])); // a repo on this computer wins over a same-nwo remote one: Map keeps the last, so sort it last

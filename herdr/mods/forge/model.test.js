@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, grouped, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS, slimPr, trackFor, HOME_GROUPS, homeGroups, drafts } from "./model.js";
+import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS, slimPr, trackFor, HOME_GROUPS, homeGroups, drafts } from "./model.js";
 
 const WT = "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\nworktree /r/.claude/worktrees/ring\nHEAD bbb\nbranch refs/heads/feat/ring\n\nworktree /h/.herdr/worktrees/r/fix-login\nHEAD ccc\ndetached\n\nworktree /gone\nHEAD ddd\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n";
 
@@ -100,16 +100,6 @@ test("group: blocked agent wins, then ready PR, then working, then merged, else 
   assert.equal(g({ prs: [{ ...input().prs[0], state: "MERGED" }] }), "done");
   assert.equal(g({ agents: a("idle") }), "hold");
   assert.equal(g({ agents: [{ address: "t9", status: "working", cwd: "/r/.claude/worktrees/ring2" }] }), "hold");
-});
-
-test("grouped: four groups in order; hold oldest first, others newest first", () => {
-  const base = tracks(input())[0];
-  const mk = (over) => ({ ...base, ...over });
-  const g = grouped([mk({ group: "hold", at: 5, path: "a" }), mk({ group: "hold", at: 1, path: "b" }), mk({ group: "flight", at: 1, path: "c" }), mk({ group: "flight", at: 9, path: "d" })]);
-  assert.deepEqual(g.map((x) => x.key), ["needs", "flight", "hold", "done"]);
-  assert.deepEqual(g[2].items.map((x) => x.path), ["b", "a"]);
-  assert.deepEqual(g[1].items.map((x) => x.path), ["d", "c"]);
-  assert.equal(g[0].items.length, 0);
 });
 
 test("branchFor: a shelved issue resumes its recorded branch; a bug gets fix/, else feat/", () => {
