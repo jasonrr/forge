@@ -286,3 +286,12 @@ test("homeGroups puts drafts in flight between agent-backed and no-agent tracks"
   assert.equal(flight[1].draft, true);
   assert.equal(flight[1].root, "/code/forge");
 });
+
+test("homeGroups: a PR-only Done track from two machines' copies of one repo shows once, the local copy's", () => {
+  const t = { path: null, branch: null, slug: null, pr: { url: "u/5", number: 5 }, agents: [], issues: [], at: 100, merged: true, group: "done" };
+  for (const order of [["mbp", null], [null, "mbp"]]) {
+    const repos = order.map((on) => ({ root: "/code/x", on, nwo: "o/x", tracks: [{ ...t }] }));
+    const done = homeGroups({ repos }).find((g) => g.key === "done").items;
+    assert.deepEqual(done.map((i) => [i.pr.number, i.on]), [[5, null]]);
+  }
+});

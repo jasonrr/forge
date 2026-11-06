@@ -186,9 +186,10 @@ export function drafts(porcelain) {
 export function homeGroups({ repos = [], assigned = [], shelved = [], merged = [], now = Date.now() }) {
   const items = { needs: [], flight: [], planned: [], done: [] };
   const taken = new Set(), seenPr = new Set(), byNwo = new Map(repos.filter((r) => r.nwo).sort((a, b) => (a.on == null) - (b.on == null)).map((r) => [r.nwo, r])); // a repo on this computer wins over a same-nwo remote one: Map keeps the last, so sort it last
-  for (const r of repos) {
+  for (const r of [...repos].sort((a, b) => (a.on == null ? 0 : 1) - (b.on == null ? 0 : 1))) { // this computer's copy first, so it wins a duplicate
     const repo = r.root.split("/").pop();
     for (const t of r.tracks) {
+      if (!t.path && t.pr?.url && seenPr.has(t.pr.url)) continue; // the same PR-only Done item from another machine's copy of the repo
       items[t.group === "hold" ? "flight" : t.group].push({ ...t, repo, root: r.root, on: r.on ?? null });
       if (t.pr?.url) seenPr.add(t.pr.url);
       if (!t.merged && r.nwo) for (const n of t.issues) taken.add(`${r.nwo}#${n}`);
