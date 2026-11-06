@@ -83,7 +83,7 @@ export default class Forge extends View {
       try {
         if (!props()?.root && this.here) { // only the key-opened Start overlay and track pane: they resolve the repo from where the person was when they opened them (this.here), then stay put; every other view is pinned to props().root and props().on
           const { cwd, machine } = this.here;
-          if (!cwd) { this.error = "no space or folder to work from"; cx.notify(); return; }
+          if (!cwd) { this.error = "no space or folder to work from"; this.findRepos(cx); cx.notify(); return; }
           if (machine !== this.on) { this.on = machine; this.root = null; this.resetData(); }
           const common = await this.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd, machine);
           if (seq !== this.seq) return;
@@ -91,7 +91,7 @@ export default class Forge extends View {
             const up = await exec("true", [], { on: machine }).then(() => true, () => false); if (seq !== this.seq) return;
             if (!up) { this.error = `can't reach ${machine}` + (this.root ? " — showing the last data" : ""); cx.notify(); return; } // unreachable ≠ not a repo: keep what we have
           }
-          if (!common.ok) { this.root = null; this.resetData(); this.watch([], cx, machine); this.error = "no git repo in this space"; cx.notify(); return; }
+          if (!common.ok) { this.root = null; this.resetData(); this.watch([], cx, machine); this.error = "no git repo in this space"; this.findRepos(cx); cx.notify(); return; }
           const r0 = common.out.replace(/\/\.git$/, "");
           if (r0 !== this.root) { this.root = r0; this.resetData(); } // another repo's PRs, issues and url must never show
         }
@@ -538,10 +538,16 @@ export default class Forge extends View {
         .when(!slim, (el) => el.child(rail)));
   }
   initStart(cx) {
+    this.pickRepos = null; this.finding = false; // repos to choose from when no repo is focused; null until discovered
     this.mode = "issue"; this.sel = props().issue ?? null; this.alsoIssue = true; this.busy = null;
     this.title = InputState.new({ placeholder: "e.g. Shelve a track with a reason" });
     this.title.on("change", (_e, cx) => cx.notify());
     this.brief = TextareaState.new({ placeholder: "Links, constraints, what you already ruled out…", rows: 6 });
+  }
+  findRepos(cx) { // once per open: discovery can take ~20 s with a connected machine
+    if (this.route() !== "start" || this.pickRepos !== null || this.finding) return;
+    this.finding = true; cx.notify();
+    cx.spawn(async (cx) => { try { this.pickRepos = (await this.discoverRepos()).repos; } finally { this.finding = false; cx.notify(); } });
   }
   // Always a worktree (the design: a track is a worktree), at Herdr's path so the spaces sidebar nests it under the repo.
   // Then one agent tab there with /forge:start — the agent decides debug / brainstorm / plan / build by reading.
@@ -580,6 +586,7 @@ export default class Forge extends View {
       const extra = this.mode === "issue" ? "" : this.brief.value().trim();
       const task = issue ? `/forge:start #${issue.number}` : `/forge:start ${title}${extra ? `\n\n${extra}` : ""}${this.alsoIssue ? "\n\nAlso open a GitHub issue for this so it shows in the backlog if it stalls." : ""}`;
       await this.openAgent(path, task, argv);
+      run("pane.split", { direction: "right", mod: "forge", props: { view: "track", track: path, root: this.root, on: this.on } }); // run() returns no ids: this splits the focused pane, which openAgent's space.new/tab.new just made
       this.dismiss();
     } catch (e) { this.busy = String(e?.message ?? e); cx.notify(); }
   }
@@ -602,13 +609,21 @@ export default class Forge extends View {
           .child(MONO(div()).w(28).text_size(11).text_color(t.muted).child(since(i.createdAt))))
         .when(tk, (e) => e.child(div().pl(26).text_size(11).text_color(t.muted).child(`already in track "${tk}" — open it instead`)));
     };
-    const footer = this.mode === "issue"
+    const picking = !this.root && (this.finding || this.pickRepos?.length > 0); // no repo focused: choose one first
+    const pick = (r, i) => h_flex().id(`rp-${i}`).px(10).py(7).rounded(6).gap(8).items_center().cursor_pointer().hover((e) => e.bg(t.hover))
+      .on_click((_e, cx) => { this.root = r.root; this.on = r.on; this.here = null; this.error = null; this.resetData(); this.refresh(cx); })
+      .child(div().font_medium().child(r.root.split("/").pop()))
+      .when(r.on, (e) => e.child(div().text_size(11).text_color(t.muted).child(r.on)));
+    const footer = picking ? "Pick a repo to start work in" : this.mode === "issue"
       ? (sel ? `Worktree ${branchFor(sel)}${/Branch: `/.test(sel.body ?? "") ? " (resumes the shelved branch)" : ""} · agent tab opens there with #${sel.number}` : "Pick an issue")
       : "Worktree from your one-liner · agent tab opens there with your brief";
     return v_flex().id("root").size_full().bg(t.surface).text_size(13).text_color(t.foreground).rounded(10).on_size_change(this.onSize)
-      .child(this.header(t, "Start work", [this.button(t, "close", "✕", () => this.dismiss())]))
-      .child(h_flex().px(16).border_b(1).border_color(t.border).child(tab("issue", "From an issue")).child(tab("scratch", "From scratch")))
-      .when(this.mode === "issue", (el) => el
+      .child(this.header(t, "Start work", [this.button(t, "close", "✕", () => this.dismiss())], this.root ? undefined : "pick a repo"))
+      .when(picking, (el) => el.child(v_flex().flex_1().overflow_y_scroll().px(8).py(8).gap(2)
+        .child(div().px(8).pb(4).text_size(12).text_color(t.muted).child("Start work in…"))
+        .children(this.pickRepos ? this.pickRepos.map(pick) : [this.empty(t, "finding repos…")])))
+      .when(!picking, (el) => el.child(h_flex().px(16).border_b(1).border_color(t.border).child(tab("issue", "From an issue")).child(tab("scratch", "From scratch"))))
+      .when(!picking && this.mode === "issue", (el) => el
         .child(h_flex().px(16).py(10).gap(8).items_center()
           .child(div().flex_1().h(28).px(8).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.canvas).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().w_full().text_size(12)))
           .child(div().text_size(12).text_color(t.muted).child(`${this.data.issues.length} open · ${[...taken.keys()].filter((n) => this.data.issues.some((i) => i.number === n)).length} already in a track`)))
@@ -620,7 +635,7 @@ export default class Forge extends View {
             .child(this.link(t, "gh", "View on GitHub", sel.url)))
           .child(div().text_size(12.5).text_color(t.muted).max_h(60).overflow_hidden().child((sel.body ?? "").split("\n").filter(Boolean).slice(0, 3).join(" ")))
           .child(div().text_size(12).text_color(t.muted).child("The agent reads the issue and picks how to begin: a bug starts with debug, a feature with brainstorm; a design or plan already on a branch is resumed. Nothing to choose here.")))))
-      .when(this.mode === "scratch", (el) => el.child(v_flex().flex_1().px(16).py(16).gap(14)
+      .when(!picking && this.mode === "scratch", (el) => el.child(v_flex().flex_1().px(16).py(16).gap(14)
         .child(div().text_size(12).text_color(t.muted).child("What is it? One line — this becomes the slug"))
         .child(div().h(32).px(10).flex().items_center().rounded(6).border(1).border_color(t.input).bg(t.canvas).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.title).h_full().w_full().text_size(13)))
         .child(div().text_size(12).text_color(t.muted).child("Anything the agent should know (optional)"))
