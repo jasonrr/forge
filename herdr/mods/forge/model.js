@@ -178,6 +178,19 @@ export const HOME_GROUPS = [["needs", "Waiting on you"], ["flight", "In flight"]
 // Home across repos. repos: [{root, on, nwo, tracks, drafts?}] with tracks from tracks(). assigned/shelved: `gh search issues` rows
 // ({repository:{name,nameWithOwner}, number, title, url, labels, createdAt}). merged: `gh search prs --merged-at` rows
 // ({repository, number, title, url, closedAt}; search has no mergedAt, and closedAt is the merge time for a merged PR).
+// New, uncommitted design/plan files in a checkout (`git status --porcelain --untracked-files=all -- docs/decisions docs/plans`):
+// the work brainstorm/plan are writing before a worktree exists. Only new files (?? or A); an edit to a committed doc is not a draft.
+export function drafts(porcelain) {
+  const by = new Map();
+  for (const line of (porcelain ?? "").split("\n")) {
+    const m = /^(\?\?|A[ MD]) (docs\/(decisions|plans)\/\d{4}-\d{2}-\d{2}-(.+)\.md)$/.exec(line.trimEnd());
+    if (!m) continue;
+    const [, , file, dir, slug] = m, d = by.get(slug) ?? { slug, design: null, plan: null };
+    d[dir === "decisions" ? "design" : "plan"] = file; by.set(slug, d);
+  }
+  return [...by.values()];
+}
+
 export function homeGroups({ repos = [], assigned = [], shelved = [], merged = [], now = Date.now() }) {
   const items = { needs: [], flight: [], planned: [], done: [] };
   const taken = new Set(), seenPr = new Set(), byNwo = new Map(repos.filter((r) => r.nwo).sort((a, b) => (a.on == null) - (b.on == null)).map((r) => [r.nwo, r])); // a repo on this computer wins over a same-nwo remote one: Map keeps the last, so sort it last
@@ -188,6 +201,7 @@ export function homeGroups({ repos = [], assigned = [], shelved = [], merged = [
       if (t.pr?.url) seenPr.add(t.pr.url);
       if (!t.merged && r.nwo) for (const n of t.issues) taken.add(`${r.nwo}#${n}`);
     }
+    for (const d of r.drafts ?? []) items.flight.push({ draft: true, path: null, slug: d.slug, design: d.design, plan: d.plan, repo, root: r.root, on: r.on ?? null, agents: [], issues: [], at: 0, group: "draft" });
   }
   const seen = new Set();
   for (const [i, shelf] of [...shelved.map((i) => [i, true]), ...assigned.map((i) => [i, false])]) {
@@ -202,7 +216,7 @@ export function homeGroups({ repos = [], assigned = [], shelved = [], merged = [
     if (seenPr.has(p.url) || !(now - ms <= DONE_WINDOW_MS)) continue;
     items.done.push({ path: null, branch: null, pr: { ...p, state: "MERGED", mergedAt: p.closedAt }, repo: p.repository?.name ?? "", root: byNwo.get(p.repository?.nameWithOwner)?.root ?? null, on: null, agents: [], issues: [], at: ms / 1000, merged: true, group: "done" });
   }
-  const rank = (it) => (it.group === "flight" ? 0 : 2); // agent-backed before no-agent (Task 8 adds drafts at rank 1)
+  const rank = (it) => (it.group === "flight" ? 0 : it.draft ? 1 : 2); // agent-backed, then drafts, then no-agent
   items.flight.sort((a, b) => rank(a) - rank(b) || (rank(a) === 0 ? b.at - a.at : rank(a) === 2 ? a.at - b.at : 0));
   items.needs.sort((a, b) => b.at - a.at);
   items.planned.sort((a, b) => (b.shelved - a.shelved) || b.at - a.at); // shelved first, then newest

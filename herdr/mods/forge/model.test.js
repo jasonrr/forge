@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, grouped, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS, slimPr, trackFor, HOME_GROUPS, homeGroups } from "./model.js";
+import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, grouped, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS, slimPr, trackFor, HOME_GROUPS, homeGroups, drafts } from "./model.js";
 
 const WT = "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\nworktree /r/.claude/worktrees/ring\nHEAD bbb\nbranch refs/heads/feat/ring\n\nworktree /h/.herdr/worktrees/r/fix-login\nHEAD ccc\ndetached\n\nworktree /gone\nHEAD ddd\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n";
 
@@ -269,4 +269,29 @@ test("homeGroups: two repos sharing an nwo resolve to this computer's, in either
     const [p] = homeGroups({ repos, assigned: [issue] }).find((g) => g.key === "planned").items;
     assert.deepEqual([p.root, p.on], ["/l", null]);
   }
+});
+
+test("drafts pairs new design/plan files by slug; ignores modified committed docs", () => {
+  const out = [
+    "?? docs/decisions/2026-11-06-forge-home.md",
+    "?? docs/plans/2026-11-06-forge-home.md",
+    "A  docs/decisions/2026-11-05-other.md",
+    " M docs/decisions/2026-11-01-old.md",
+    "?? docs/plans/notes.txt",
+  ].join("\n");
+  assert.deepEqual(drafts(out), [
+    { slug: "forge-home", design: "docs/decisions/2026-11-06-forge-home.md", plan: "docs/plans/2026-11-06-forge-home.md" },
+    { slug: "other", design: "docs/decisions/2026-11-05-other.md", plan: null },
+  ]);
+  assert.deepEqual(drafts(""), []);
+});
+
+test("homeGroups puts drafts in flight between agent-backed and no-agent tracks", () => {
+  const t = (over) => ({ path: "/w/x", branch: "feat/x", slug: "x", pr: null, agents: [], issues: [], at: 100, merged: false, group: "hold", ...over });
+  const g = homeGroups({ repos: [{ root: "/code/forge", on: null, nwo: "o/forge", tracks: [t({ path: "/w/h", group: "hold" }), t({ path: "/w/f", group: "flight" })],
+    drafts: [{ slug: "forge-home", design: "docs/decisions/2026-11-06-forge-home.md", plan: null }] }] });
+  const flight = g.find((x) => x.key === "flight").items;
+  assert.deepEqual(flight.map((i) => i.path ?? `draft:${i.slug}`), ["/w/f", "draft:forge-home", "/w/h"]);
+  assert.equal(flight[1].draft, true);
+  assert.equal(flight[1].root, "/code/forge");
 });

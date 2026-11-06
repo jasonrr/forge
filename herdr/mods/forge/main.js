@@ -5,7 +5,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
 import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, setShared, shared } from "herdr";
 import { writeFile, mkdir, readdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app, reads under home (AGENTS.md "Other built-ins")
-import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, branchFor, shelfBranch, slimPr, trackFor, homeGroups, DONE_WINDOW_MS } from "./model.js";
+import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, branchFor, shelfBranch, slimPr, trackFor, homeGroups, drafts, DONE_WINDOW_MS } from "./model.js";
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const PR_FIELDS = "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author";
@@ -28,7 +28,7 @@ function location() {
   return { cwd: pane?.cwd || f?.cwd || sibling?.cwd || space?.folder, space: space?.id, machine: space?.machine ?? null };
 }
 
-const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, ahead: {}, me: null, repoUrl: null, nwo: null });
+const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, ahead: {}, me: null, repoUrl: null, nwo: null, drafts: [] });
 
 export default class Forge extends View {
   init(_p, cx) {
@@ -109,7 +109,7 @@ export default class Forge extends View {
         const me = (await this.cachedGh(`me:${on ?? ""}`, ["api", "user"], root, on, DAY, (u) => u.login)) ?? this.data.me; // a failed lookup keeps a known login
         if (seq !== this.seq) return;
         this.base = r.base;
-        this.data = { worktrees: r.worktrees, docs: r.docs, prs: r.prs ?? this.data.prs, issues, ages: r.ages, ahead: r.ahead, me, repoUrl: r.repoUrl, nwo: r.nwo };
+        this.data = { worktrees: r.worktrees, docs: r.docs, prs: r.prs ?? this.data.prs, issues, ages: r.ages, ahead: r.ahead, me, repoUrl: r.repoUrl, nwo: r.nwo, drafts: r.drafts };
         this.error = r.prs ? null : "gh unavailable — PRs may be stale";
         this.fetched = Date.now();
         if (this.route() === "track") { this.loadDoc(cx, !!this.on); if (this.tab === "issues") this.fetchIssues(cx); } // the detail pane's first load: track() is null until this data exists; remote: re-read every tick (no folder watch)
@@ -139,12 +139,14 @@ export default class Forge extends View {
     };
     const ws = wt.filter((w) => !w.main);
     if (on) { for (const w of ws) await one(w); } else await Promise.all(ws.map(one)); // ponytail: sequential on a remote — hc runs at most 16 execs per machine and every open view refreshes on its own
+    const st = await git(["status", "--porcelain", "--untracked-files=all", "--", "docs/decisions", "docs/plans"]);
+    const dr = st.ok ? drafts(st.out) : (prev.drafts ?? []); // could not run ≠ no drafts
     const key = `${on ?? ""}:${root}`, pl = (state, limit) => ["pr", "list", "--state", state, "--limit", String(limit), "--json", PR_FIELDS];
     const open = await this.cachedGh(`pr-open:${key}`, pl("open", 100), root, on, GH_TTL, (ps) => ps.map(slimPr));
     const done = await this.cachedGh(`pr-merged:${key}`, [...pl("merged", 30), "--author", "@me"], root, on, GH_TTL, (ps) => ps.map(slimPr)); // sequential: remote exec rule
     const id = await this.cachedGh(`repo:${key}`, ["repo", "view", "--json", "url,nameWithOwner"], root, on, DAY);
     const prs = open && done ? [...open, ...done] : null; // tracks() ignores CLOSED; an OPEN PR on a reused branch still wins (model.js)
-    return { ok: true, base, worktrees: wt, docs, ages, ahead, prs, repoUrl: id?.url ?? prev.repoUrl ?? null, nwo: id?.nameWithOwner ?? prev.nwo ?? null }; // a failed lookup keeps the previous identity
+    return { ok: true, base, worktrees: wt, docs, ages, ahead, prs, repoUrl: id?.url ?? prev.repoUrl ?? null, nwo: id?.nameWithOwner ?? prev.nwo ?? null, drafts: dr }; // a failed lookup keeps the previous identity
   }
   // Repos = git roots behind open spaces (any machine) ∪ ~/.herdr/worktrees/* on this computer, deduped by machine + git common dir.
   // A rejected exec (unreachable machine, missing folder) is "unknown", not "not a repo": refreshHome keeps that machine's previous repos.
@@ -198,7 +200,7 @@ export default class Forge extends View {
     const ps = panes();
     const repos = this.repos.map(({ root, on, data }) => {
       const ag = agentsOn(agents(), spaces(), on).map((a) => ({ address: a.address, status: a.status, cwd: ps.find((p) => p.pane === a.pane)?.cwd ?? null }));
-      return { root, on, nwo: data.nwo, tracks: tracks({ worktrees: data.worktrees, docs: data.docs, prs: data.prs ?? [], agents: ag, ages: data.ages, ahead: data.ahead, me: this.meBy[on ?? ""] ?? null }) }; // that machine's gh user filters Done
+      return { root, on, nwo: data.nwo, drafts: data.drafts, tracks: tracks({ worktrees: data.worktrees, docs: data.docs, prs: data.prs ?? [], agents: ag, ages: data.ages, ahead: data.ahead, me: this.meBy[on ?? ""] ?? null }) }; // that machine's gh user filters Done
     });
     return homeGroups({ repos, ...this.found });
   }
@@ -276,6 +278,7 @@ export default class Forge extends View {
     // /forge:start is the only begin verb: it reads the branch and routes (debug / brainstorm / plan / build / review); the label is for the human.
     return { label: nextLabel(t), go: () => this.openAgent(t.path, "/forge:start", undefined, ctx.on) };
   }
+  draftStart(d, root, on) { return { label: d.plan ? "Dispatch" : "Plan", go: () => this.openAgent(root, `/forge:start ${d.plan ?? d.design}`, undefined, on) }; } // /forge:start routes a design to plan and a plan to build
   shelve(t) { this.openAgent(t.path, "/forge:shelve"); }
 
   // --- shared pieces ---
@@ -316,6 +319,15 @@ export default class Forge extends View {
           .child(muted(ago(it.at)))
           .when(it.root, (e) => e.child(this.button(t, `h-ps-${key}`, it.shelved ? "Resume" : "Start", () => this.openStart(it.issue.number, it.root, it.on), true)))
           .child(this.link(t, `h-pl-${key}`, "", it.issue.url));
+      }
+      if (it.draft) {
+        const key = `${it.on ?? ""}-${it.root}-${it.slug}`, ds = this.draftStart(it, it.root, it.on);
+        return row(`h-d-${key}`)
+          .child(repoCell(it))
+          .child(div().flex_1().min_w(0).truncate().child(it.slug))
+          .child(muted(`${it.design ? "design ✓" : "design –"} · ${it.plan ? "plan ✓" : "plan –"}`))
+          .child(muted("on main"))
+          .child(this.button(t, `h-dd-${key}`, ds.label, ds.go, true));
       }
       const key = `${g.key}-${it.on ?? ""}-${it.path ?? it.pr.url}`, nx = it.path ? this.next(it, { root: it.root, on: it.on }) : null;
       return row(`h-${key}`).when(it.path, (e) => e.cursor_pointer().on_click(focusSpace(it)))
@@ -458,7 +470,15 @@ export default class Forge extends View {
       const pane = (...kids) => v_flex().id("root").size_full().bg(t.surface).p(12).gap(8).text_color(t.dim).children(kids);
       if (!this.data.worktrees.length) return pane(this.error ?? "loading…");
       if (this.trackPath()) return pane("This track's worktree is gone (shelved or removed).");
+      const here = this.data.drafts ?? [];
       return pane(div().font_semibold().text_size(14).text_color(t.foreground).child(this.repoName() || "No repo"), "Not in a track.",
+        ...(here.length ? [div().text_size(12).text_color(t.muted).child("Drafts here (not dispatched yet)"), ...here.map((d) => {
+          const ds = this.draftStart(d, this.root, this.on);
+          return h_flex().gap(8).items_center().min_w(0)
+            .child(MONO(div()).flex_1().min_w(0).truncate().text_color(t.foreground).child(`${d.slug} · ${d.design ? "design ✓" : "design –"} · ${d.plan ? "plan ✓" : "plan –"}`))
+            .children([["design", "Read design"], ["plan", "Read plan"]].filter(([k]) => d[k] && !this.on).map(([k, l]) => this.button(t, `rd-${d.slug}-${k}`, l, () => exec("open", [`${this.root}/${d[k]}`]))))
+            .child(this.button(t, `ds-${d.slug}`, ds.label, ds.go, true));
+        })] : []),
         h_flex().gap(8).child(this.button(t, "start", "+ Start work", () => this.openStart(null), true))
           .child(this.button(t, "home", "Home", () => this.openHome())));
     }
