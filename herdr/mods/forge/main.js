@@ -28,6 +28,7 @@ function location() {
   return { cwd: pane?.cwd || f?.cwd || sibling?.cwd || space?.folder, machine: space?.machine ?? null };
 }
 
+const oneByOne = async (fs) => { const out = []; for (const f of fs) out.push(await f()); return out; }; // run thunks one at a time
 const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, ahead: {}, me: null, repoUrl: null, nwo: null, drafts: [] });
 
 export default class Forge extends View {
@@ -44,6 +45,7 @@ export default class Forge extends View {
     if (r === "track") this.initDetail(cx);
     if (r === "moved") return; // an old docked copy: no git or gh work
     if (r === "home") { // Home spans every repo: no this.root, no this.here
+      this.seedHome();
       this.refreshHome(cx);
       cx.timer.every(GH_TTL, (cx) => { if (!this.refreshing) this.refreshHome(cx); });
       return;
@@ -143,9 +145,10 @@ export default class Forge extends View {
     const st = await git(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all", "--", "docs/decisions", "docs/plans"]);
     const dr = st.ok ? drafts(st.out) : (prev.drafts ?? []); // could not run ≠ no drafts
     const key = `${on ?? ""}:${root}`, pl = (state, limit) => ["pr", "list", "--state", state, "--limit", String(limit), "--json", PR_FIELDS];
-    const open = await this.cachedGh(`pr-open:${key}`, pl("open", 100), root, on, GH_TTL, (ps) => ps.map(slimPr));
-    const done = await this.cachedGh(`pr-merged:${key}`, [...pl("merged", 30), "--author", "@me"], root, on, GH_TTL, (ps) => ps.map(slimPr)); // sequential: remote exec rule
-    const id = await this.cachedGh(`repo:${key}`, ["repo", "view", "--json", "url,nameWithOwner"], root, on, DAY);
+    const calls = [() => this.cachedGh(`pr-open:${key}`, pl("open", 100), root, on, GH_TTL, (ps) => ps.map(slimPr)),
+      () => this.cachedGh(`pr-merged:${key}`, [...pl("merged", 30), "--author", "@me"], root, on, GH_TTL, (ps) => ps.map(slimPr)),
+      () => this.cachedGh(`repo:${key}`, ["repo", "view", "--json", "url,nameWithOwner"], root, on, DAY)];
+    const [open, done, id] = on ? await oneByOne(calls) : await Promise.all(calls.map((f) => f())); // sequential on a remote: remote exec rule
     const prs = open && done ? [...open, ...done] : null; // tracks() ignores CLOSED; an OPEN PR on a reused branch still wins (model.js)
     return { ok: true, base, worktrees: wt, docs, ages, ahead, prs, repoUrl: id?.url ?? prev.repoUrl ?? null, nwo: id?.nameWithOwner ?? prev.nwo ?? null, drafts: dr }; // a failed lookup keeps the previous identity
   }
@@ -175,28 +178,46 @@ export default class Forge extends View {
       try {
         const { repos, unreachable } = await this.discoverRepos(), out = [];
         for (const r of this.repos) if (r.on && (unreachable.has(r.on) || !spaces().some((s) => (s.machine ?? null) === r.on)) && !repos.some((x) => x.root === r.root && x.on === r.on)) repos.push({ root: r.root, on: r.on, stale: true });
-        for (const { root, on, stale } of repos) { // sequential; PR lists come from the shared cache
+        const load = async ({ root, on, stale }) => { // PR lists come from the shared cache
           const prev = this.repos.find((r) => r.root === root && r.on === on)?.data ?? emptyData();
-          if (stale) { out.push({ root, on, data: prev, error: `can't reach ${on} — showing the last data` }); continue; }
+          if (stale) { out.push({ root, on, data: prev, error: `can't reach ${on} — showing the last data` }); return; }
           const r = await this.loadRepo(root, on, prev);
           out.push({ root, on, data: r.ok ? { ...r, prs: r.prs ?? prev.prs } : prev, error: r.ok ? null : r.error });
-          if (!this.loaded) { this.repos = [...out]; cx.notify(); } // first load: show each repo as it arrives
-        }
+          if (!this.loaded) { this.repos = [...out]; cx.notify(); } // very first load (no snapshot): show each repo as it arrives
+        };
         const sinceDay = new Date(Date.now() - DONE_WINDOW_MS).toISOString().slice(0, 10);
         const search = (key, args) => this.cachedGh(key, ["search", ...args], home(), null);
         const issueFields = "repository,number,title,url,labels,createdAt"; // no body: Home never reads it and the cache persists
-        const assigned = await search("s:assigned", ["issues", "--assignee", "@me", "--state", "open", "--limit", "100", "--json", issueFields]);
-        const shelved = await search("s:shelved", ["issues", "--author", "@me", "--label", "shelved", "--state", "open", "--limit", "100", "--json", issueFields]);
-        const merged = await search("s:merged", ["prs", "--author", "@me", "--merged-at", `>=${sinceDay}`, "--limit", "100", "--json", "repository,number,title,url,closedAt"]);
+        const [[assigned, shelved, merged]] = await Promise.all([ // this computer in parallel; each remote machine one exec at a time
+          Promise.all([search("s:assigned", ["issues", "--assignee", "@me", "--state", "open", "--limit", "100", "--json", issueFields]),
+            search("s:shelved", ["issues", "--author", "@me", "--label", "shelved", "--state", "open", "--limit", "100", "--json", issueFields]),
+            search("s:merged", ["prs", "--author", "@me", "--merged-at", `>=${sinceDay}`, "--limit", "100", "--json", "repository,number,title,url,closedAt"])]),
+          ...repos.filter((r) => !r.on).map(load),
+          ...[...new Set(repos.filter((r) => r.on).map((r) => r.on))].map((m) => oneByOne(repos.filter((r) => r.on === m).map((r) => () => load(r)))),
+        ]);
         this.repos = out;
         this.found = { assigned: assigned ?? this.found.assigned, shelved: shelved ?? this.found.shelved, merged: merged ?? this.found.merged };
         this.homeErr = [assigned, shelved, merged].includes(null) ? "gh search unavailable — Planned/Done may be stale" : null;
         const meBy = {};
         for (const { root, on } of out) if (!((on ?? "") in meBy)) meBy[on ?? ""] = (await this.cachedGh(`me:${on ?? ""}`, ["api", "user"], root, on, DAY, (u) => u.login)) ?? this.meBy[on ?? ""]; // one lookup per machine, sequential
         this.meBy = meBy; this.loaded = true;
+        this.saveHome();
         cx.notify();
       } finally { this.refreshing = false; }
     });
+  }
+  // Home's last result in shared.json, so a new Home tab paints at once and refreshes behind it. PR lists are not copied: they are
+  // read back from their gh cache entries, whatever their age. Design text keeps only the lines tracks() reads.
+  // ponytail: one snapshot for all Home copies; the last refresh to finish wins, which is fine — they read the same sources.
+  saveHome() {
+    const slim = (d) => ({ ...d, prs: undefined, docs: Object.fromEntries(Object.entries(d.docs).map(([k, v]) => [k, { ...v, designText: (v.designText ?? "").split("\n").filter((l) => /#\d/.test(l)).join("\n") }])) });
+    setShared("forge.home", { repos: this.repos.map(({ root, on, error, data }) => ({ root, on, error, data: slim(data) })), found: this.found, meBy: this.meBy });
+  }
+  seedHome() {
+    const h = shared("forge.home"); if (!h?.repos) return;
+    const prs = (on, root) => { const k = `${on ?? ""}:${root}`, o = shared(`forge.gh.pr-open:${k}`)?.data, m = shared(`forge.gh.pr-merged:${k}`)?.data; return o && m ? [...o, ...m] : []; };
+    this.repos = h.repos.map((r) => ({ ...r, data: { ...emptyData(), ...r.data, prs: prs(r.on, r.root) } }));
+    this.found = h.found ?? this.found; this.meBy = h.meBy ?? {}; this.loaded = true;
   }
   homeModel() { // live: agents() changes re-render this view by themselves
     const ps = panes();

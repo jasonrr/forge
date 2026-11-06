@@ -211,9 +211,9 @@ test("agentsOn: only that machine's agents; an unknown space is nobody's", () =>
   assert.deepEqual(agentsOn(ag, sp, undefined).map((a) => a.address), ["t1"]);
 });
 
-test("slimPr keeps only checklist and #ref lines of the body", () => {
-  const p = { number: 1, headRefName: "feat/a", body: "Intro text\n- [x] T1 one\n- [ ] T2 two\nCloses #12\nlong prose\n" };
-  assert.deepEqual(slimPr(p), { number: 1, headRefName: "feat/a", body: "- [x] T1 one\n- [ ] T2 two\nCloses #12" });
+test("slimPr keeps checklist lines and only the #refs of prose", () => {
+  const p = { number: 1, headRefName: "feat/a", body: "Intro text\n- [x] T1 one\n- [ ] T2 two\nCloses #12, see #7 and abc#9\nlong prose\n" };
+  assert.deepEqual(slimPr(p), { number: 1, headRefName: "feat/a", body: "- [x] T1 one\n- [ ] T2 two\n#12 #7" });
   assert.equal(slimPr({ number: 2, body: null }).body, "");
 });
 
@@ -294,4 +294,12 @@ test("homeGroups: a PR-only Done track from two machines' copies of one repo sho
     const done = homeGroups({ repos }).find((g) => g.key === "done").items;
     assert.deepEqual(done.map((i) => [i.pr.number, i.on]), [[5, null]]);
   }
+});
+
+test("homeGroups: a merged PR with a worktree on one machine beats the other machine's PR-only copy", () => {
+  const prOnly = { path: null, branch: null, slug: null, pr: { url: "u/5", number: 5 }, agents: [], issues: [], at: 100, merged: true, group: "done" };
+  const withWt = { ...prOnly, path: "/w/x-5", branch: "fix/x" };
+  const repos = [{ root: "/code/x", on: null, nwo: "o/x", tracks: [prOnly] }, { root: "/code/x", on: "mbp", nwo: "o/x", tracks: [withWt] }];
+  const done = homeGroups({ repos }).find((g) => g.key === "done").items;
+  assert.deepEqual(done.map((i) => [i.pr.number, i.on, i.path]), [[5, "mbp", "/w/x-5"]]);
 });

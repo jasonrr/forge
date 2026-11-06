@@ -155,7 +155,7 @@ export function isParked(issue) {
 // The shared gh cache persists to shared.json on every write: keep only the body lines the panel reads —
 // checklist boxes (progress, planTasks ticks) and lines with #refs (linked issues). The PR tab fetches the full body on demand.
 export function slimPr(p) {
-  const body = (p.body ?? "").split("\n").filter((l) => /^\s*- \[[ xX]\]|#\d+/.test(l)).join("\n");
+  const body = (p.body ?? "").split("\n").map((l) => /^\s*- \[[ xX]\]/.test(l) ? l : linked(l).map((n) => `#${n}`).join(" ")).filter(Boolean).join("\n"); // checklist lines whole; prose shrinks to its #refs (all linked() reads)
   return { ...p, body };
 }
 
@@ -186,10 +186,11 @@ export function drafts(porcelain) {
 export function homeGroups({ repos = [], assigned = [], shelved = [], merged = [], now = Date.now() }) {
   const items = { needs: [], flight: [], planned: [], done: [] };
   const taken = new Set(), seenPr = new Set(), byNwo = new Map(repos.filter((r) => r.nwo).sort((a, b) => (a.on == null) - (b.on == null)).map((r) => [r.nwo, r])); // a repo on this computer wins over a same-nwo remote one: Map keeps the last, so sort it last
+  const withPath = new Set(repos.flatMap((r) => r.tracks.filter((t) => t.path && t.pr?.url).map((t) => t.pr.url))); // a PR that has a worktree anywhere: that row wins over PR-only copies
   for (const r of [...repos].sort((a, b) => (a.on == null ? 0 : 1) - (b.on == null ? 0 : 1))) { // this computer's copy first, so it wins a duplicate
     const repo = r.root.split("/").pop();
     for (const t of r.tracks) {
-      if (!t.path && t.pr?.url && seenPr.has(t.pr.url)) continue; // the same PR-only Done item from another machine's copy of the repo
+      if (!t.path && t.pr?.url && (seenPr.has(t.pr.url) || withPath.has(t.pr.url))) continue; // the same PR-only Done item from another machine's copy of the repo
       items[t.group === "hold" ? "flight" : t.group].push({ ...t, repo, root: r.root, on: r.on ?? null });
       if (t.pr?.url) seenPr.add(t.pr.url);
       if (!t.merged && r.nwo) for (const n of t.issues) taken.add(`${r.nwo}#${n}`);
