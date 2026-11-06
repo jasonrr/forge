@@ -139,7 +139,7 @@ export default class Forge extends View {
     };
     const ws = wt.filter((w) => !w.main);
     if (on) { for (const w of ws) await one(w); } else await Promise.all(ws.map(one)); // ponytail: sequential on a remote — hc runs at most 16 execs per machine and every open view refreshes on its own
-    const st = await git(["status", "--porcelain", "--untracked-files=all", "--", "docs/decisions", "docs/plans"]);
+    const st = await git(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all", "--", "docs/decisions", "docs/plans"]);
     const dr = st.ok ? drafts(st.out) : (prev.drafts ?? []); // could not run ≠ no drafts
     const key = `${on ?? ""}:${root}`, pl = (state, limit) => ["pr", "list", "--state", state, "--limit", String(limit), "--json", PR_FIELDS];
     const open = await this.cachedGh(`pr-open:${key}`, pl("open", 100), root, on, GH_TTL, (ps) => ps.map(slimPr));
@@ -278,7 +278,10 @@ export default class Forge extends View {
     // /forge:start is the only begin verb: it reads the branch and routes (debug / brainstorm / plan / build / review); the label is for the human.
     return { label: nextLabel(t), go: () => this.openAgent(t.path, "/forge:start", undefined, ctx.on) };
   }
-  draftStart(d, root, on) { return { label: d.plan ? "Dispatch" : "Plan", go: () => this.openAgent(root, `/forge:start ${d.plan ?? d.design}`, undefined, on) }; } // /forge:start routes a design to plan and a plan to build
+  draftStart(d, root, on) { // /forge:plan moves the uncommitted draft into a fresh worktree; /forge:start would not see it there
+    const task = d.plan ? `/forge:plan ${d.design ?? d.plan} — the plan ${d.plan} is already written: skip authoring and go straight to the hand-off` : `/forge:plan ${d.design}`;
+    return { label: d.plan ? "Dispatch" : "Plan", go: () => this.openAgent(root, task, undefined, on) };
+  }
   shelve(t) { this.openAgent(t.path, "/forge:shelve"); }
 
   // --- shared pieces ---

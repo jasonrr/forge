@@ -183,7 +183,7 @@ export const HOME_GROUPS = [["needs", "Waiting on you"], ["flight", "In flight"]
 export function drafts(porcelain) {
   const by = new Map();
   for (const line of (porcelain ?? "").split("\n")) {
-    const m = /^(\?\?|A[ MD]) (docs\/(decisions|plans)\/\d{4}-\d{2}-\d{2}-(.+)\.md)$/.exec(line.trimEnd());
+    const m = /^(\?\?|A[ MD]) (docs\/(decisions|plans)\/\d{4}-\d{2}-\d{2}-([^/]+)\.md)$/.exec(line.trimEnd());
     if (!m) continue;
     const [, , file, dir, slug] = m, d = by.get(slug) ?? { slug, design: null, plan: null };
     d[dir === "decisions" ? "design" : "plan"] = file; by.set(slug, d);

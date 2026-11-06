@@ -278,6 +278,7 @@ test("drafts pairs new design/plan files by slug; ignores modified committed doc
     "A  docs/decisions/2026-11-05-other.md",
     " M docs/decisions/2026-11-01-old.md",
     "?? docs/plans/notes.txt",
+    "?? docs/decisions/2026-11-06-sub/x.md",
   ].join("\n");
   assert.deepEqual(drafts(out), [
     { slug: "forge-home", design: "docs/decisions/2026-11-06-forge-home.md", plan: "docs/plans/2026-11-06-forge-home.md" },
