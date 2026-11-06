@@ -41,7 +41,10 @@ export default class Forge extends View {
     if (r === "start") this.initStart(cx);
     if (r === "track") this.initDetail(cx);
     if (r === "moved") return; // an old docked copy: no git or gh work
-    if (!props()?.root) this.here = location();
+    if (!props()?.root) {
+      const pin = r === "track" && !props()?.track ? this.savedPin() : null; // a restarted key-opened pane stays on its pinned repo, wherever focus is now
+      this.here = pin ? { cwd: pin.path, machine: pin.on ?? null } : location();
+    }
     this.refresh(cx);
     cx.timer.every(GH_TTL, (cx) => { if (!this.refreshing) this.refresh(cx); }); // the folder watch covers files, agents() re-renders by itself
   }
@@ -152,15 +155,16 @@ export default class Forge extends View {
     return tracks({ ...this.data, agents: ag });
   }
   // Start passes props.track. A key-opened pane (props {view:"track"}) resolves once from where the person was (this.here)
-  // and remembers it in this copy's localStorage (per copy — verified live), so a restart with focus elsewhere keeps it.
-  // ponytail: a cached one-time resolution, not tracked state; if it names a removed worktree the pane says so.
+  // and remembers it, with its machine, in this copy's localStorage (per copy — verified live): a restart with focus elsewhere
+  // re-resolves the same repo from the pin (init). ponytail: a cached one-time resolution, not tracked state; if it names a removed worktree the pane says so.
+  savedPin() { try { const p = JSON.parse(localStorage.getItem("forge.track")); return typeof p?.path === "string" ? p : null; } catch { return null; } } // an old plain-string value or garbage: ignored
   trackPath() {
     if (props()?.track) return props().track;
     if (this.pinned) return this.pinned;
-    const saved = localStorage.getItem("forge.track");
-    if (saved) return (this.pinned = saved);
+    const saved = this.savedPin();
+    if (saved) return (this.pinned = saved.path);
     const p = trackFor(this.data.worktrees, this.here?.cwd);
-    if (p) { this.pinned = p; localStorage.setItem("forge.track", p); }
+    if (p) { this.pinned = p; localStorage.setItem("forge.track", JSON.stringify({ path: p, on: this.on })); }
     return p;
   }
   track() { const p = this.trackPath(); return p ? this.live().find((t) => t.path === p) ?? null : null; } // tracks() also holds PR-only Done items with path null: never match those
@@ -272,7 +276,7 @@ export default class Forge extends View {
   initDetail(cx) {
     this.tab = "design"; this.docs = {}; this.editing = false; this.editor = null; this.saveMsg = null; this.log = []; this.reloading = false; this.issueInfo = {}; this.prBody = null;
     cx.spawn(async (cx) => { if (this.on) return; // a remote track: refresh() (GH_TTL timer) reloads it
-      while (!this.trackPath()) await cx.sleep(1000); // a key-opened pane has no path until refresh() has the worktrees
+      while (!this.trackPath()) { if (this.data.worktrees.length) return; await cx.sleep(1000); } // a key-opened pane has no path until refresh() has the worktrees; loaded and still none: not in a track, nothing will change that
       for (;;) {
       try { await watchFolder(`${this.trackPath()}/docs`); } catch { if (this.data.worktrees.length && !this.track()) return; await cx.sleep(5000); continue; }
       if (!this.editing) { this.docs = {}; this.loadDoc(cx); }
