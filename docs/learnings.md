@@ -46,5 +46,8 @@
 
 ## issue-cleanup (#38, 2026-11-07)
 
-- A branch name reused after its PR merged attaches the old MERGED PR to the new worktree (Done, "Remove worktree") → compare the worktree's HEAD commit time with `mergedAt`: a merge older than HEAD belongs to an earlier track; squash/rebase merges keep the branch's commits older than the merge, so the test holds either way.
+- Telling a reused branch name's old merged PR from the worktree's own (the open question above) → HEAD commit time vs `mergedAt` works for merge-commit, squash and rebase merges (the branch's commits stay older than the merge); it misreads a worktree that pulls main after its own merge, which is the accepted ceiling.
 - A missing count read as `Number("") || 0` paints a confident `0 commits ahead` on every card when the base ref is wrong → keep "could not read" as `null` and have the renderer drop the segment.
+- A local `exec` rejects on a missing cwd (herdr.d.ts), so a local git call that "failed" is a verdict (the folder is gone) while a remote one is not (the machine may be unreachable) → branch on `machine` before treating a rejected exec as "keep the last data".
+- `git symbolic-ref refs/remotes/origin/HEAD` happily returns a dangling target after the default branch was renamed → verify the ref it names like any other candidate before using it as the base.
+- A `null` introduced for "unknown" reaches every renderer of the field, not only the one the issue named → grep all readers before relying on one formatter to drop it.

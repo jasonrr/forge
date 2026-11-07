@@ -92,7 +92,7 @@ export function tracks(input) {
     const d = input.docs?.[w.path] ?? {};
     const mine = (input.prs ?? []).filter((p) => p.headRefName === w.branch);
     const at = input.ages?.[w.path] ?? 0; // HEAD's commit time
-    const stale = (p) => at > 0 && p.mergedAt && at >= Date.parse(p.mergedAt) / 1000; // a merged PR older than this worktree's HEAD: an earlier track that reused the branch name, not this one
+    const stale = (p) => at > 0 && p.mergedAt && at > Date.parse(p.mergedAt) / 1000; // a merged PR older than this worktree's HEAD: an earlier track that reused the branch name. Equal: HEAD is the merge commit itself (pulled after a merge-commit merge) — still this PR. ponytail: commit time, not ancestry; a worktree that pulls main after its own merge reads as fresh
     const pr = w.branch ? mine.find((p) => p.state === "OPEN") ?? mine.find((p) => p.state === "MERGED" && !stale(p)) ?? null : null; // a shelved track's closed draft PR is history, not state
     const t = {
       path: w.path, branch: w.branch ?? "(detached)", slug: w.branch ? w.branch.replace(/^[^/]+\//, "") : w.path.split("/").filter(Boolean).pop(),
@@ -153,9 +153,10 @@ export function branchFor(issue, title) {
 export function isParked(issue) {
   return /^\[p\d\]/.test(issue.title ?? "") || parkedFrom(issue) !== "";
 }
-// The "parked from" phrase the backlog shows, or "": the same vocabulary isParked accepts, so an agent badge always has a source.
+// The "parked from" phrase the backlog shows, or "": one regex for the badge and the cell, so an agent badge always has a source.
+// Writers today: review-branch "From review of PR #n", build "From PR #n", brainstorm "Deferred from design <file>"; the bare words are what a person types.
 export function parkedFrom(issue) {
-  return /\b(From (PR #\d+|PR|review of (PR #\d+|the \w+)|review)|Filed from the \w+|Filed from|Parked(?::? [^\n.]*)?|Deferred from (design \S+|\w+))/.exec(issue.body ?? "")?.[0].trim() ?? "";
+  return /\b(From (PR #\d+|review of PR #\d+|review|PR)|Filed from( the \w+)?|Parked|Deferred from( design \S+)?)\b/.exec(issue.body ?? "")?.[0] ?? "";
 }
 
 // The shared gh cache persists to shared.json on every write: keep only the body lines the panel reads —

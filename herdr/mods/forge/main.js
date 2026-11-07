@@ -91,9 +91,9 @@ export default class Forge extends View {
           if (machine !== this.on) { this.on = machine; this.root = null; this.resetData(); }
           const common = await this.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd, machine);
           if (seq !== this.seq) return;
-          if (common.failed) { // the exec did not run (unreachable machine, missing remote folder, a timeout): not a verdict on the repo — keep what we have
-            const up = machine ? await exec("true", [], { on: machine }).then(() => true, () => false) : false; if (seq !== this.seq) return;
-            this.error = (up ? "git did not answer" : machine ? `can't reach ${machine}` : "can't run git") + (this.root ? " — showing the last data" : ""); cx.notify(); return;
+          if (common.failed && machine) { // a remote exec that did not run (unreachable machine, missing remote folder, a timeout) is not a verdict on the repo: keep what we have. A local one is (exec rejects on a missing folder — a removed worktree): fall through
+            const up = await exec("true", [], { on: machine }).then(() => true, () => false); if (seq !== this.seq) return;
+            this.error = (up ? "git did not answer" : `can't reach ${machine}`) + (this.root ? " — showing the last data" : ""); cx.notify(); return;
           }
           if (!common.ok) { this.root = null; this.resetData(); this.watch([], cx, machine); this.error = this.fromPin ? "This track's worktree is gone (shelved or removed)." : "no git repo in this space"; this.findRepos(cx); cx.notify(); return; } // a pin names a worktree that was removed: say that, not "no repo"
           const r0 = common.out.replace(/\/\.git$/, "");
@@ -116,7 +116,10 @@ export default class Forge extends View {
         this.data = { worktrees: r.worktrees, docs: r.docs, prs: r.prs ?? this.data.prs, issues, ages: r.ages, ahead: r.ahead, me, repoUrl: r.repoUrl, nwo: r.nwo, drafts: r.drafts };
         this.error = r.prs ? null : "gh unavailable — PRs may be stale";
         this.fetched = Date.now();
-        if (this.route() === "track") { this.loadDoc(cx, !!this.on); if (this.tab === "issues") this.fetchIssues(cx); if (this.tab === "pr" && this.prBody?.failed) this.fetchPrBody(cx, this.prBody.n); } // a failed PR-body load retries on the next tick, not only on a tab re-click (#35) // the detail pane's first load: track() is null until this data exists; remote: re-read every tick (no folder watch)
+        if (this.route() === "track") { // the detail pane's first load: track() is null until this data exists; remote: re-read every tick (no folder watch)
+          this.loadDoc(cx, !!this.on); if (this.tab === "issues") this.fetchIssues(cx);
+          const pn = this.tab === "pr" ? this.track()?.pr?.number : null; if (pn) this.fetchPrBody(cx, pn); // the shown PR body follows the gh cache (60 s): a failed load retries here, not only on a tab re-click (#35)
+        }
         cx.notify();
       } finally { if (seq === this.seq) this.refreshing = false; } // a superseded refresh must not clear the newer one's flag
     });
@@ -124,10 +127,9 @@ export default class Forge extends View {
   // One repo's data, no this.* writes and no seq: the caller (refresh, Home) checks staleness. `prev` supplies keep-what-we-had values; always pass `on` (this.git's defaults are wrong for Home).
   async loadRepo(root, on, prev = emptyData()) {
     const git = (args, cwd = root) => this.git(args, cwd, on);
-    const head = await git(["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"]); // the clone's default branch (origin/main, origin/master, origin/trunk)
-    let base = head.ok && head.out ? head.out : null;
-    for (const b of ["origin/main", "main", "master"]) { if (base) break; if ((await git(["rev-parse", "--verify", "-q", b])).ok) base = b; }
-    base ??= "main"; // nothing verifies: rev-list fails below, ahead stays null, and the header still names something
+    const head = await git(["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"]); // the clone's default branch (origin/main, origin/master, origin/trunk); may dangle after a rename, so it is verified like the rest
+    let base = "main"; // nothing verifies: rev-list fails below, ahead stays null, the header still names something
+    for (const b of [head.ok && head.out, "origin/main", "main"].filter(Boolean)) if ((await git(["rev-parse", "--verify", "-q", b])).ok) { base = b; break; }
     const list = await git(["worktree", "list", "--porcelain"]);
     if (!list.ok) return { ok: false, error: (list.failed ? (on ? `can't reach ${on}` : "can't run git") : "git worktree list failed") + (prev.worktrees.length ? " — showing the last data" : "") }; // never replace tracks with an empty list
     const wt = parseWorktrees(list.out);
@@ -381,7 +383,7 @@ export default class Forge extends View {
           .child(MONO(div()).flex_1().min_w(0).truncate().child(it.branch))
           .child(it.agents.length
             ? div().px(6).py(1).rounded(9).flex_none().text_size(10.5).bg(alpha(color, "22")).text_color(color).child(g.key === "needs" && !it.agents.some((a) => a.status === "blocked") ? "review PR" : chip(it))
-            : muted(`○ no agent · ${it.ahead} ahead · ${ago(it.at)}`))
+            : muted(["○ no agent", it.ahead == null ? null : `${it.ahead} ahead`, ago(it.at)].filter(Boolean).join(" · "))) // ahead null: unknown, say nothing (#19)
           .when(it.progress?.total, (e) => e.child(muted(`${it.progress.done}/${it.progress.total}`)))
           .when(it.pr, (e) => e.child(this.link(t, `h-pr-${key}`, `PR #${it.pr.number}`, it.pr.url))))
         .when(nx, (e) => e.child(this.button(t, `h-nx-${key}`, nx.label, nx.go, g.key !== "done")));

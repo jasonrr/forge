@@ -327,9 +327,9 @@ test("parkedFrom shows a source for every body isParked accepts (#12)", () => {
     assert.notEqual(parkedFrom(i), "", body);
   }
   assert.equal(parkedFrom({ body: "From review of PR #11 https://github.com/x/pull/11" }), "From review of PR #11");
-  assert.equal(parkedFrom({ body: "Deferred from design docs/decisions/2026-11-06-forge-home.md. Build once" }), "Deferred from design docs/decisions/2026-11-06-forge-home.md.");
-  assert.equal(parkedFrom({ body: "Parked: later\nmore" }), "Parked: later");
-  assert.equal(parkedFrom({ body: "From discussion on PR #29" }), "");
+  assert.equal(parkedFrom({ body: "Deferred from design docs/decisions/2026-11-06-forge-home.md. Build once" }), "Deferred from design docs/decisions/2026-11-06-forge-home.md");
+  assert.equal(parkedFrom({ body: "Parked: later\nmore" }), "Parked");
+  for (const body of ["From discussion on PR #29", "From reviewing the logs", "From PRs on this repo", "Unparked now"]) { assert.equal(parkedFrom({ body }), "", body); assert.equal(isParked({ title: "t", body }), false, body); }
   assert.equal(isParked({ title: "[p3] x", body: "" }), true);
 });
 
@@ -357,6 +357,8 @@ test("tracks: a merged PR older than the worktree's HEAD belongs to an earlier t
   assert.equal(fresh[0].pr, null); assert.equal(fresh[0].group, "hold"); assert.equal(fresh[0].reason, "no agent · 0 commits ahead · no PR");
   const merged = tracks({ worktrees: wt, prs: [old], ages: { "/w": Date.parse("2025-12-30T00:00:00Z") / 1000 }, ahead: { "/w": 3 }, now: Date.parse("2026-01-02T00:00:00Z") }); // squash-merged: its commits are still ahead of main
   assert.equal(merged[0].pr, old); assert.equal(merged[0].group, "done");
+  const tie = tracks({ worktrees: wt, prs: [old], ages: { "/w": Date.parse("2026-01-01T00:00:00Z") / 1000 }, ahead: {}, now: Date.parse("2026-01-02T00:00:00Z") }); // HEAD is the merge commit (pulled after the merge): still this PR
+  assert.equal(tie[0].pr, old);
   const openToo = tracks({ worktrees: wt, prs: [old, { number: 2, state: "OPEN", isDraft: true, headRefName: "feat/x", body: "" }], ages: { "/w": 0 }, ahead: {}, now: 0 });
   assert.equal(openToo[0].pr.number, 2);
   assert.equal(fresh.filter((t) => !t.path).length, 1, "the old PR still shows as a PR-only Done item");
