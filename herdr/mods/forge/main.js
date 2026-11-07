@@ -129,7 +129,7 @@ export default class Forge extends View {
     const git = (args, cwd = root) => this.git(args, cwd, on);
     const head = await git(["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"]); // the clone's default branch (origin/main, origin/master, origin/trunk); may dangle after a rename, so it is verified like the rest
     let base = "main"; // nothing verifies: rev-list fails below, ahead stays null, the header still names something
-    for (const b of [head.ok && head.out, "origin/main", "main"].filter(Boolean)) if ((await git(["rev-parse", "--verify", "-q", b])).ok) { base = b; break; }
+    for (const b of [head.ok && head.out, "origin/main", "main", "master"].filter(Boolean)) if ((await git(["rev-parse", "--verify", "-q", b])).ok) { base = b; break; }
     const list = await git(["worktree", "list", "--porcelain"]);
     if (!list.ok) return { ok: false, error: (list.failed ? (on ? `can't reach ${on}` : "can't run git") : "git worktree list failed") + (prev.worktrees.length ? " — showing the last data" : "") }; // never replace tracks with an empty list
     const wt = parseWorktrees(list.out);
