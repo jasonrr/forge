@@ -154,7 +154,8 @@ export default class Forge extends View {
     const prs = open && done ? [...open, ...done] : null; // tracks() ignores CLOSED; an OPEN PR on a reused branch still wins (model.js)
     return { ok: true, base, worktrees: wt, docs, ages, ahead, prs, repoUrl: id?.url ?? prev.repoUrl ?? null, nwo: id?.nameWithOwner ?? prev.nwo ?? null, drafts: dr }; // a failed lookup keeps the previous identity
   }
-  // Repos = git roots behind open spaces (any machine) ∪ ~/.herdr/worktrees/* on this computer, deduped by machine + git common dir.
+  // Repos = git roots behind open spaces (any machine) ∪ ~/.herdr/worktrees/* ∪ the paths listed in ~/.config/herdr-app/forge-repos
+  // (one per line, # comments, ~ allowed; this computer only), deduped by machine + git common dir. The list keeps a repo on Home with no space or worktree open.
   // A rejected exec (unreachable machine, missing folder) is "unknown", not "not a repo": refreshHome keeps that machine's previous repos.
   async discoverRepos() {
     const seen = new Map(), unreachable = new Set(), tried = new Set();
@@ -172,6 +173,8 @@ export default class Forge extends View {
       if (await add(p, null)) continue; // a symlink to a repo, or a repo itself
       for (const k of await readdir(p, { withFileTypes: true }).catch(() => [])) if (k.isDirectory() && await add(`${p}/${k.name}`, null)) break; // a folder of worktrees: any one names the repo
     }
+    const listed = (await readTextFile(`${appHome()}/forge-repos`).catch(() => null)) ?? "";
+    for (const line of listed.split("\n")) { const p = line.replace(/#.*/, "").trim(); if (p) await add(p.replace(/^~(?=\/|$)/, home()), null); }
     return { repos: [...seen.values()], unreachable };
   }
   refreshHome(cx) {
