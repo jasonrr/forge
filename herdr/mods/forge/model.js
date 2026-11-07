@@ -61,7 +61,7 @@ function group(t) {
 }
 
 // The Home row's / track pane's one line: what the agent says it is doing; without one, the facts on disk.
-const lead = (t) => t.agents.find((x) => x.status === "blocked") ?? t.agents.find((x) => x.status === "working") ?? t.agents[0] ?? null;
+export const lead = (t) => t.agents.find((x) => x.status === "blocked") ?? t.agents.find((x) => x.status === "working") ?? t.agents[0] ?? null;
 function reason(t) {
   const a = lead(t);
   if (a?.status === "blocked") return a.msg ? `blocked · ${a.msg}` : "agent asked you something";
@@ -70,7 +70,7 @@ function reason(t) {
   if (t.group === "done") return `merged · PR #${t.pr.number}`;
   const pr = t.pr ? `${t.pr.isDraft ? "draft " : ""}PR #${t.pr.number}` : "no PR";
   const who = a ? `${a.status}${a.msg ? ` · ${a.msg}` : ""}` : "no agent"; // an idle or done agent is still on the track: say so, with its last message
-  return `${who} · ${t.ahead} commit${t.ahead === 1 ? "" : "s"} ahead · ${pr}`;
+  return [who, t.ahead == null ? null : `${t.ahead} commit${t.ahead === 1 ? "" : "s"} ahead`, pr].filter(Boolean).join(" · "); // ahead null: the count could not be read (no base ref, remote hiccup) — say nothing rather than 0
 }
 
 export function chip(t) { const a = lead(t); return a && (a.status === "blocked" || a.status === "working") ? a.status : t.merged ? "merged" : a?.status ?? "no agent"; } // the Home row's status chip: the agent that decides the group, else merged
@@ -91,14 +91,16 @@ export function tracks(input) {
   const ts = input.worktrees.filter((w) => !w.main).map((w) => {
     const d = input.docs?.[w.path] ?? {};
     const mine = (input.prs ?? []).filter((p) => p.headRefName === w.branch);
-    const pr = w.branch ? mine.find((p) => p.state === "OPEN") ?? mine.find((p) => p.state === "MERGED") ?? null : null; // a shelved track's closed draft PR is history, not state
+    const at = input.ages?.[w.path] ?? 0; // HEAD's commit time
+    const stale = (p) => at > 0 && p.mergedAt && at >= Date.parse(p.mergedAt) / 1000; // a merged PR older than this worktree's HEAD: an earlier track that reused the branch name, not this one
+    const pr = w.branch ? mine.find((p) => p.state === "OPEN") ?? mine.find((p) => p.state === "MERGED" && !stale(p)) ?? null : null; // a shelved track's closed draft PR is history, not state
     const t = {
       path: w.path, branch: w.branch ?? "(detached)", slug: w.branch ? w.branch.replace(/^[^/]+\//, "") : w.path.split("/").filter(Boolean).pop(),
       design: d.design ?? null, plan: d.plan ?? null, pr,
       agents: (input.agents ?? []).filter((a) => a.cwd && under(a.cwd, w.path)),
       issues: linked(`${pr?.body ?? ""}\n${(d.designText ?? "").split("\n").filter((l) => /\b(issue|closes|fixes|resolves|from|parked|deferred)\b/i.test(l)).join("\n")}`), // design prose mentions many #n; only issue-talking lines count
-      at: input.ages?.[w.path] ?? 0,
-      ahead: input.ahead?.[w.path] ?? 0,
+      at,
+      ahead: input.ahead?.[w.path] ?? null, // null: unknown (see reason)
       merged: pr?.state === "MERGED",
     };
     if (t.merged && pr.mergedAt) t.at = Date.parse(pr.mergedAt) / 1000; // Done sorts by merge time, like the PR-only items below
@@ -106,9 +108,9 @@ export function tracks(input) {
     return t;
   });
   // Done keeps a merged PR for DONE_WINDOW_MS after its worktree is gone. path null: no detail pane, no actions but the PR link.
-  const have = new Set(ts.map((t) => t.branch));
+  const have = new Set(ts.map((t) => t.pr?.url).filter(Boolean)); // PRs a worktree attached; a merged PR a reused-name worktree disowned still shows here
   for (const p of input.prs ?? []) {
-    if (p.state !== "MERGED" || !p.mergedAt || have.has(p.headRefName) || /^(main|master)$/.test(p.headRefName)) continue; // a fork's main merged here would be a Done item named "main"
+    if (p.state !== "MERGED" || !p.mergedAt || have.has(p.url) || /^(main|master)$/.test(p.headRefName)) continue; // a fork's main merged here would be a Done item named "main"
     const ms = Date.parse(p.mergedAt);
     if (!(now - ms >= 0 && now - ms < DONE_WINDOW_MS)) continue;
     if (input.me && p.author?.login !== input.me) continue; // teammates' and bots' merged PRs are not this user's Done; unknown me keeps all
@@ -149,7 +151,11 @@ export function branchFor(issue, title) {
 
 // Forge's agents file issues as `[p<sev>] …` with "From PR #n" / "From review of …" / "Filed from the plan".
 export function isParked(issue) {
-  return /^\[p\d\]/.test(issue.title ?? "") || /\b(From (PR|review)|Filed from|Parked|Deferred from)\b/.test(issue.body ?? "");
+  return /^\[p\d\]/.test(issue.title ?? "") || parkedFrom(issue) !== "";
+}
+// The "parked from" phrase the backlog shows, or "": the same vocabulary isParked accepts, so an agent badge always has a source.
+export function parkedFrom(issue) {
+  return /\b(From (PR #\d+|PR|review of (PR #\d+|the \w+)|review)|Filed from the \w+|Filed from|Parked(?::? [^\n.]*)?|Deferred from (design \S+|\w+))/.exec(issue.body ?? "")?.[0].trim() ?? "";
 }
 
 // The shared gh cache persists to shared.json on every write: keep only the body lines the panel reads —
@@ -195,7 +201,7 @@ export function homeGroups({ repos = [], assigned = [], shelved = [], merged = [
       if (t.pr?.url) seenPr.add(t.pr.url);
       if (!t.merged && r.nwo) for (const n of t.issues) taken.add(`${r.nwo}#${n}`);
     }
-    for (const d of r.drafts ?? []) items.flight.push({ draft: true, path: null, slug: d.slug, design: d.design, plan: d.plan, repo, root: r.root, on: r.on ?? null, agents: [], issues: [], at: 0, group: "draft" });
+    for (const d of r.drafts ?? []) items.flight.push({ draft: true, path: null, slug: d.slug, design: d.design, plan: d.plan, repo, root: r.root, on: r.on ?? null, agents: [], issues: [], at: 0 }); // agents/issues: the row code reads them like any flight item
   }
   const seen = new Set();
   for (const [i, shelf] of [...shelved.map((i) => [i, true]), ...assigned.map((i) => [i, false])]) {

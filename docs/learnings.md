@@ -43,3 +43,8 @@
 - A review-fix pass that changes load order (progressive render) can expose state that was only consistent at the end of the old sequence (Done before meBy) → re-review a fix with the question "what was only true after the old last step?"
 - The same GitHub repo checked out on two connected machines doubles every per-repo list Home merges (Done showed each PR twice) → when aggregating across machines, dedupe by GitHub identity (nwo / PR url), not by root path.
 - A per-key TTL cache with no stale-while-revalidate → every view opened after the TTL waits on the full sequential refetch; paint from the last result first, refresh behind it.
+
+## issue-cleanup (#38, 2026-11-07)
+
+- A branch name reused after its PR merged attaches the old MERGED PR to the new worktree (Done, "Remove worktree") → compare the worktree's HEAD commit time with `mergedAt`: a merge older than HEAD belongs to an earlier track; squash/rebase merges keep the branch's commits older than the merge, so the test holds either way.
+- A missing count read as `Number("") || 0` paints a confident `0 commits ahead` on every card when the base ref is wrong → keep "could not read" as `null` and have the renderer drop the segment.
