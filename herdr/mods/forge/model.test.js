@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, takenIssues, isParked, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS, slimPr, trackFor, HOME_GROUPS, homeGroups, drafts, cacheLife, newest, QUIET_CAP } from "./model.js";
+import { readFileSync } from "node:fs";
+import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, takenIssues, isParked, parkedFrom, lead, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS, slimPr, trackFor, HOME_GROUPS, homeGroups, drafts, cacheLife, newest, QUIET_CAP } from "./model.js";
 
 const WT = "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\nworktree /r/.claude/worktrees/ring\nHEAD bbb\nbranch refs/heads/feat/ring\n\nworktree /h/.herdr/worktrees/r/fix-login\nHEAD ccc\ndetached\n\nworktree /gone\nHEAD ddd\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n";
 
@@ -62,7 +63,7 @@ test("tracks: one per non-main worktree; stage, group, issues, progress", () => 
   assert.equal(t.branch, "feat/ring");
   assert.equal(t.slug, "ring");
   assert.equal(t.pr.number, 55);
-  assert.equal(nextLabel(t), "Resume"); assert.equal(t.merged, false); assert.equal(t.ahead, 0);
+  assert.equal(nextLabel(t), "Resume"); assert.equal(t.merged, false); assert.equal(t.ahead, null); // no count given: unknown, not 0 (#19)
   assert.equal(t.group, "hold");
   assert.deepEqual(t.issues, [38, 51]);
   assert.deepEqual(t.progress, { done: 1, total: 2 });
@@ -148,7 +149,7 @@ test("reason: the agent's message leads; without an agent, commits ahead and PR 
   assert.equal(r({ ahead: { "/r/.claude/worktrees/ring": 3 } }), "no agent · 3 commits ahead · draft PR #55");
   assert.equal(r({ ahead: { "/r/.claude/worktrees/ring": 1 }, prs: [] }), "no agent · 1 commit ahead · no PR");
   assert.equal(r({ agents: a("idle", "committed T2"), ahead: { "/r/.claude/worktrees/ring": 2 } }), "idle · committed T2 · 2 commits ahead · draft PR #55");
-  assert.equal(r({ agents: a("done", null) }), "done · 0 commits ahead · draft PR #55");
+  assert.equal(r({ agents: a("done", null) }), "done · draft PR #55");
   assert.equal(r({ prs: [{ ...input().prs[0], isDraft: false }] }), "review PR #55");
 });
 
@@ -163,11 +164,11 @@ test("done: a merged PR within 7 days is a track without a worktree; older or al
   const merged = (n, branch, daysAgo) => ({ number: n, title: `PR ${n}`, body: "Closes #70", url: `u${n}`, isDraft: false, state: "MERGED", headRefName: branch, mergedAt: new Date(now - daysAgo * 86400 * 1000).toISOString() });
   const ts = tracks(input({ prs: [input().prs[0], merged(60, "feat/old", 8), merged(61, "fix/fresh", 2), merged(62, "feat/ring", 1)] }));
   const done = ts.filter((t) => t.group === "done");
-  assert.deepEqual(done.map((t) => [t.pr.number, t.path, t.slug, t.branch, t.merged]), [[61, null, "fresh", "fix/fresh", true]]);
+  assert.deepEqual(done.map((t) => [t.pr.number, t.path, t.slug, t.branch, t.merged]), [[61, null, "fresh", "fix/fresh", true], [62, null, "ring", "feat/ring", true]]); // 62: an earlier merge on a branch whose worktree now has an open PR — history, shown as PR-only (#16)
   assert.equal(done[0].reason, "merged · PR #61");
   assert.deepEqual(done[0].issues, [70]);
   assert.equal(done[0].at, Date.parse(done[0].pr.mergedAt) / 1000);
-  assert.equal(ts.filter((t) => t.branch === "feat/ring").length, 1); // the worktree's own track wins over the PR-only one
+  assert.equal(ts.filter((t) => t.branch === "feat/ring" && t.path).length, 1); // the worktree's own track attaches the open PR, not the merged one
   assert.equal(DONE_WINDOW_MS, 7 * 86400 * 1000);
 });
 
@@ -317,4 +318,64 @@ test("newest picks the latest timestamp in a gh list, else null", () => {
   assert.equal(newest([{ updatedAt: "2026-01-01T00:00:00Z" }, { closedAt: "2026-03-01T00:00:00Z" }, { createdAt: "bad" }]), Date.parse("2026-03-01T00:00:00Z"));
   assert.equal(newest([]), null);
   assert.equal(newest({ login: "x" }), null);
+});
+
+test("parkedFrom shows a source for every body isParked accepts (#12)", () => {
+  for (const body of ["x\n\nFrom review of PR #11 https://g/11", "From PR #4", "Deferred from design docs/decisions/a.md.", "Filed from the build", "From review of the plan", "Parked: later", "Deferred from the design review"]) {
+    const i = { title: "t", body };
+    assert.equal(isParked(i), true, body);
+    assert.notEqual(parkedFrom(i), "", body);
+  }
+  assert.equal(parkedFrom({ body: "From review of PR #11 https://github.com/x/pull/11" }), "From review of PR #11");
+  assert.equal(parkedFrom({ body: "Deferred from design docs/decisions/2026-11-06-forge-home.md. Build once" }), "Deferred from design docs/decisions/2026-11-06-forge-home.md");
+  assert.equal(parkedFrom({ body: "Parked: later\nmore" }), "Parked");
+  for (const body of ["From discussion on PR #29", "From reviewing the logs", "From PRs on this repo", "Unparked now"]) { assert.equal(parkedFrom({ body }), "", body); assert.equal(isParked({ title: "t", body }), false, body); }
+  assert.equal(isParked({ title: "[p3] x", body: "" }), true);
+});
+
+test("the start skill states the slug rule model.js implements (#13)", () => {
+  const skill = readFileSync(new URL("../../../skills/start/SKILL.md", import.meta.url), "utf8");
+  assert.match(skill, /outside `a-z0-9` → `-`/);
+  assert.match(skill, /cut to 40 characters/);
+  assert.equal(slugify("a".repeat(60)).length, 40);
+  assert.match(skill, /`fix\/<slug>` when the issue carries the `bug` label, else `feat\/<slug>`/);
+  assert.match(skill, /use `issue-<n>` for an issue, else `work`/);
+});
+
+test("lead picks blocked, then working, then the first agent (#20)", () => {
+  const b = { status: "blocked" }, w = { status: "working" }, i = { status: "idle" };
+  assert.equal(lead({ agents: [i, w, b] }), b);
+  assert.equal(lead({ agents: [i, w] }), w);
+  assert.equal(lead({ agents: [i] }), i);
+  assert.equal(lead({ agents: [] }), null);
+});
+
+test("tracks: a merged PR older than the worktree's HEAD belongs to an earlier track (#16)", () => {
+  const old = { number: 1, state: "MERGED", headRefName: "feat/x", mergedAt: "2026-01-01T00:00:00Z", body: "" };
+  const wt = [{ path: "/r", branch: "main", main: true }, { path: "/w", branch: "feat/x", main: false }];
+  const fresh = tracks({ worktrees: wt, prs: [old], ages: { "/w": Date.parse("2026-01-02T00:00:00Z") / 1000 }, ahead: { "/w": 0 }, now: Date.parse("2026-01-03T00:00:00Z") });
+  assert.equal(fresh[0].pr, null); assert.equal(fresh[0].group, "hold"); assert.equal(fresh[0].reason, "no agent · 0 commits ahead · no PR");
+  const merged = tracks({ worktrees: wt, prs: [old], ages: { "/w": Date.parse("2025-12-30T00:00:00Z") / 1000 }, ahead: { "/w": 3 }, now: Date.parse("2026-01-02T00:00:00Z") }); // squash-merged: its commits are still ahead of main
+  assert.equal(merged[0].pr, old); assert.equal(merged[0].group, "done");
+  const tie = tracks({ worktrees: wt, prs: [old], ages: { "/w": Date.parse("2026-01-01T00:00:00Z") / 1000 }, ahead: {}, now: Date.parse("2026-01-02T00:00:00Z") }); // HEAD is the merge commit (pulled after the merge): still this PR
+  assert.equal(tie[0].pr, old);
+  const openToo = tracks({ worktrees: wt, prs: [old, { number: 2, state: "OPEN", isDraft: true, headRefName: "feat/x", body: "" }], ages: { "/w": 0 }, ahead: {}, now: 0 });
+  assert.equal(openToo[0].pr.number, 2);
+  assert.equal(fresh.filter((t) => !t.path).length, 1, "the old PR still shows as a PR-only Done item");
+});
+
+test("reason drops the commits-ahead segment when the count is unknown (#19)", () => {
+  const wt = [{ path: "/r", branch: "main", main: true }, { path: "/w", branch: "feat/x", main: false }];
+  assert.equal(tracks({ worktrees: wt, prs: [], ages: {}, ahead: {} })[0].reason, "no agent · no PR");
+  assert.equal(tracks({ worktrees: wt, prs: [], ages: {}, ahead: { "/w": 1 } })[0].reason, "no agent · 1 commit ahead · no PR");
+});
+
+test("homeGroups: a PR-only Done copy yields to another machine's worktree track for the same PR (#35)", () => {
+  const pr = { number: 9, state: "MERGED", headRefName: "feat/x", url: "u9", mergedAt: "2026-01-01T00:00:00Z", body: "" };
+  const now = Date.parse("2026-01-02T00:00:00Z");
+  const local = tracks({ worktrees: [{ path: "/r", branch: "main", main: true }], prs: [pr], ages: {}, ahead: {}, now });
+  const remote = tracks({ worktrees: [{ path: "/r", branch: "main", main: true }, { path: "/w", branch: "feat/x", main: false }], prs: [pr], ages: {}, ahead: {}, now });
+  const g = homeGroups({ repos: [{ root: "/r", on: null, nwo: "a/r", tracks: local }, { root: "/r", on: "box", nwo: "a/r", tracks: remote }], now });
+  const done = g.find((x) => x.key === "done").items;
+  assert.equal(done.length, 1); assert.equal(done[0].path, "/w"); assert.equal(done[0].on, "box");
 });

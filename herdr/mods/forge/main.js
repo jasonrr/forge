@@ -5,13 +5,13 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
 import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, setShared, shared } from "herdr";
 import { writeFile, mkdir, readdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app, reads under home (AGENTS.md "Other built-ins")
-import { nextLabel, chip, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, branchFor, shelfBranch, slimPr, trackFor, homeGroups, drafts, DONE_WINDOW_MS, cacheLife, newest } from "./model.js";
+import { nextLabel, chip, lead, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, parkedFrom, branchFor, shelfBranch, slimPr, trackFor, homeGroups, drafts, DONE_WINDOW_MS, cacheLife, newest } from "./model.js";
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const PR_FIELDS = "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author";
 const GH_TTL = 60000; // gh results are cached across all forge views for this long (shared()); GraphQL budget: 5000 pts/h per user
 const DAY = 86400000;
-const DONE_SUFFIX = ` · ${DONE_WINDOW_MS / DAY} DAYS`;
+const OVERLAY = 720; // the Start dialog, px square; mod.json "overlay" (the mod.open path) must say the same — JSON, so it cannot import this
 const MONO = (el) => el.font_family(settings().font_family); // the terminal's mono font (AGENTS.md: settings().font_family)
 const ago = (sec) => { const d = Math.max(0, Date.now() / 1000 - sec); return d < 3600 ? `${Math.floor(d / 60)}m` : d < 86400 ? `${Math.floor(d / 3600)}h` : `${Math.floor(d / 86400)}d`; };
 const since = (iso) => ago(Date.parse(iso) / 1000);
@@ -52,6 +52,7 @@ export default class Forge extends View {
     }
     if (!props()?.root) {
       const pin = r === "track" && !props()?.track ? this.savedPin() : null; // a restarted key-opened pane stays on its pinned repo, wherever focus is now
+      this.fromPin = !!pin;
       this.here = pin ? { cwd: pin.path, machine: pin.on ?? null } : location();
     }
     this.refresh(cx);
@@ -78,7 +79,7 @@ export default class Forge extends View {
   }
 
   // Every data reset also forgets the issues cache: an emptied list must never pass for a fresh fetch.
-  resetData() { this.data = emptyData(); this.issuesAt = 0; this.fetched = 0; }
+  resetData() { this.data = emptyData(); this.issuesAt = 0; this.fetched = 0; this.base = "origin/main"; }
   refresh(cx) {
     cx.spawn(async (cx) => {
       const seq = ++this.seq; // a newer refresh (or a repo change) supersedes this one: it must not write its data
@@ -90,11 +91,11 @@ export default class Forge extends View {
           if (machine !== this.on) { this.on = machine; this.root = null; this.resetData(); }
           const common = await this.git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd, machine);
           if (seq !== this.seq) return;
-          if (common.failed && machine) { // a missing remote folder fails the same way as an unreachable machine: probe with no cwd
+          if (common.failed && machine) { // a remote exec that did not run (unreachable machine, missing remote folder, a timeout) is not a verdict on the repo: keep what we have. A local one is (exec rejects on a missing folder — a removed worktree): fall through
             const up = await exec("true", [], { on: machine }).then(() => true, () => false); if (seq !== this.seq) return;
-            if (!up) { this.error = `can't reach ${machine}` + (this.root ? " — showing the last data" : ""); cx.notify(); return; } // unreachable ≠ not a repo: keep what we have
+            this.error = (up ? "git did not answer" : `can't reach ${machine}`) + (this.root ? " — showing the last data" : ""); cx.notify(); return;
           }
-          if (!common.ok) { this.root = null; this.resetData(); this.watch([], cx, machine); this.error = "no git repo in this space"; this.findRepos(cx); cx.notify(); return; }
+          if (!common.ok) { this.root = null; this.resetData(); this.watch([], cx, machine); this.error = this.fromPin ? "This track's worktree is gone (shelved or removed)." : "no git repo in this space"; this.findRepos(cx); cx.notify(); return; } // a pin names a worktree that was removed: say that, not "no repo"
           const r0 = common.out.replace(/\/\.git$/, "");
           if (r0 !== this.root) { this.root = r0; this.resetData(); } // another repo's PRs, issues and url must never show
         }
@@ -115,7 +116,10 @@ export default class Forge extends View {
         this.data = { worktrees: r.worktrees, docs: r.docs, prs: r.prs ?? this.data.prs, issues, ages: r.ages, ahead: r.ahead, me, repoUrl: r.repoUrl, nwo: r.nwo, drafts: r.drafts };
         this.error = r.prs ? null : "gh unavailable — PRs may be stale";
         this.fetched = Date.now();
-        if (this.route() === "track") { this.loadDoc(cx, !!this.on); if (this.tab === "issues") this.fetchIssues(cx); } // the detail pane's first load: track() is null until this data exists; remote: re-read every tick (no folder watch)
+        if (this.route() === "track") { // the detail pane's first load: track() is null until this data exists; remote: re-read every tick (no folder watch)
+          this.loadDoc(cx, !!this.on); if (this.tab === "issues") this.fetchIssues(cx);
+          const pn = this.tab === "pr" ? this.track()?.pr?.number : null; if (pn) this.fetchPrBody(cx, pn); // the shown PR body follows the gh cache (60 s): a failed load retries here, not only on a tab re-click (#35)
+        }
         cx.notify();
       } finally { if (seq === this.seq) this.refreshing = false; } // a superseded refresh must not clear the newer one's flag
     });
@@ -123,23 +127,25 @@ export default class Forge extends View {
   // One repo's data, no this.* writes and no seq: the caller (refresh, Home) checks staleness. `prev` supplies keep-what-we-had values; always pass `on` (this.git's defaults are wrong for Home).
   async loadRepo(root, on, prev = emptyData()) {
     const git = (args, cwd = root) => this.git(args, cwd, on);
-    const base = (await git(["rev-parse", "--verify", "-q", "origin/main"])).ok ? "origin/main" : "main";
+    const head = await git(["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"]); // the clone's default branch (origin/main, origin/master, origin/trunk); may dangle after a rename, so it is verified like the rest
+    let base = "main"; // nothing verifies: rev-list fails below, ahead stays null, the header still names something
+    for (const b of [head.ok && head.out, "origin/main", "main", "master"].filter(Boolean)) if ((await git(["rev-parse", "--verify", "-q", b])).ok) { base = b; break; }
     const list = await git(["worktree", "list", "--porcelain"]);
-    if (!list.ok) return { ok: false, error: list.failed ? (on ? `can't reach ${on} — showing the last data` : "can't run git — showing the last data") : "git worktree list failed — showing the last data" }; // never replace tracks with an empty list
+    if (!list.ok) return { ok: false, error: (list.failed ? (on ? `can't reach ${on}` : "can't run git") : "git worktree list failed") + (prev.worktrees.length ? " — showing the last data" : "") }; // never replace tracks with an empty list
     const wt = parseWorktrees(list.out);
     const docs = {}, ages = {}, ahead = {};
     const one = async (w) => {
       const changed = await git(["diff", "--name-only", `${base}...HEAD`, "--", "docs/decisions", "docs/plans"], w.path);
       const untracked = await git(["ls-files", "--others", "--exclude-standard", "docs/decisions", "docs/plans"], w.path);
-      if (changed.failed || untracked.failed) { if (prev.docs[w.path]) { docs[w.path] = prev.docs[w.path]; ages[w.path] = prev.ages[w.path] ?? 0; ahead[w.path] = prev.ahead[w.path] ?? 0; } return; } // an exec that could not run is not "no docs": keep what we had
+      if (changed.failed || untracked.failed) { if (prev.docs[w.path]) { docs[w.path] = prev.docs[w.path]; ages[w.path] = prev.ages[w.path] ?? 0; ahead[w.path] = prev.ahead[w.path] ?? null; } return; } // an exec that could not run is not "no docs": keep what we had
       const files = `${changed.out}\n${untracked.out}`.split("\n").filter(Boolean);
       const design = files.find((f) => f.startsWith("docs/decisions/")) ?? null, plan = files.find((f) => f.startsWith("docs/plans/")) ?? null;
       const designText = design ? (await readTextFile(`${w.path}/${design}`, { on }).catch(() => "")) ?? "" : "";
       // (a pruned worktree never gets here: parseWorktrees drops `prunable` blocks)
       docs[w.path] = { design, plan, designText };
       const lg = await git(["log", "-1", "--format=%ct"], w.path), rl = await git(["rev-list", "--count", `${base}..HEAD`], w.path);
-      ages[w.path] = lg.failed ? prev.ages[w.path] ?? 0 : Number(lg.out) || 0; // a rejected exec keeps what we had
-      ahead[w.path] = rl.failed ? prev.ahead[w.path] ?? 0 : Number(rl.out) || 0;
+      ages[w.path] = lg.ok ? Number(lg.out) || 0 : prev.ages[w.path] ?? 0; // a rejected or failed read keeps what we had, never 0 (#25)
+      ahead[w.path] = rl.ok ? Number(rl.out) || 0 : prev.ahead[w.path] ?? null; // null: unknown (no base ref) — reason() drops the segment (#19)
     };
     const ws = wt.filter((w) => !w.main);
     if (on) { for (const w of ws) await one(w); } else await Promise.all(ws.map(one)); // ponytail: sequential on a remote — hc runs at most 16 execs per machine and every open view refreshes on its own
@@ -182,12 +188,16 @@ export default class Forge extends View {
       if (this.refreshing) return; this.refreshing = true;
       try {
         const { repos, unreachable } = await this.discoverRepos(), out = [];
-        for (const r of this.repos) if (r.on && (unreachable.has(r.on) || !spaces().some((s) => (s.machine ?? null) === r.on)) && !repos.some((x) => x.root === r.root && x.on === r.on)) repos.push({ root: r.root, on: r.on, stale: true });
+        const noSpaces = !spaces().length; // the layout has not loaded yet (a restored Home tab at app start): a local repo known only through its space would vanish for one tick
+        for (const r of this.repos) if (!repos.some((x) => x.root === r.root && x.on === r.on)) {
+          if (r.on && (unreachable.has(r.on) || !spaces().some((s) => (s.machine ?? null) === r.on))) repos.push({ root: r.root, on: r.on, stale: true });
+          else if (!r.on && noSpaces) repos.push({ root: r.root, on: null }); // loads normally: the path is on this computer
+        }
         const load = async ({ root, on, stale }) => { // PR lists come from the shared cache
           const prev = this.repos.find((r) => r.root === root && r.on === on)?.data ?? emptyData();
           if (stale) { out.push({ root, on, data: prev, error: `can't reach ${on} — showing the last data` }); return; }
           const r = await this.loadRepo(root, on, prev);
-          out.push({ root, on, data: r.ok ? { ...r, prs: r.prs ?? prev.prs } : prev, error: r.ok ? null : r.error });
+          out.push({ root, on, data: r.ok ? { ...r, prs: r.prs ?? prev.prs } : prev, error: r.ok ? (r.prs ? null : "gh unavailable — PRs may be stale") : r.error });
           if (!this.loaded) { this.repos = [...out]; cx.notify(); } // very first load (no snapshot): show each repo as it arrives
         };
         const sinceDay = new Date(Date.now() - DONE_WINDOW_MS).toISOString().slice(0, 10);
@@ -254,13 +264,12 @@ export default class Forge extends View {
   trackPath() {
     if (props()?.track) return props().track;
     if (this.pinned) return this.pinned;
-    const saved = this.savedPin();
-    if (saved) return (this.pinned = saved.path);
-    const p = trackFor(this.data.worktrees, this.here?.cwd);
-    if (p) { this.pinned = p; try { localStorage.setItem("forge.track", JSON.stringify({ path: p, on: this.on })); } catch {} } // storage unavailable: the pin lives in this.pinned only
-    return p;
+    this.pinned = this.savedPin()?.path ?? trackFor(this.data.worktrees, this.here?.cwd) ?? null; // the stored pin, else resolve once from where the pane opened
+    if (this.pinned) try { localStorage.setItem("forge.track", JSON.stringify({ path: this.pinned, on: this.on })); } catch {} // storage unavailable: the pin lives in this.pinned only
+    return this.pinned;
   }
   track() { const p = this.trackPath(); return p ? this.live().find((t) => t.path === p) ?? null : null; } // tracks() also holds PR-only Done items with path null: never match those
+  fetchPrBody(cx, n) { cx.spawn(async (cx) => { const r = await this.cachedGh(`prbody:${this.on ?? ""}:${this.root}:${n}`, ["pr", "view", String(n), "--json", "body"], this.root, this.on); this.prBody = r ? { n, body: r.body } : { n, body: null, failed: true }; cx.notify(); }); }
   async fetchIssues(cx) {
     const tr = this.track(); if (!tr) return;
     for (const n of tr.issues) { // sequential: remote exec rule
@@ -288,13 +297,17 @@ export default class Forge extends View {
     if (space) run("tab.new", { space: space.id, argv, task }); else run("space.new", { folder: path, machine: on ?? "", argv, task });
   }
   openGitHub(url) { exec("open", [url]); }
-  openHome() { run("tab.new", { name: "Forge", mod: "forge", props: { view: "home" } }); }
-  openStart(issue, root = this.root, on = this.on) { openOverlay({ mod: "forge", props: { view: "start", root, on, issue }, kind: "dialog", width: 720, height: 720 }); }
+  openHome() { // one Home: select the open one (by the name openHome gives it, on any space) before making another
+    const open = spaces().flatMap((s) => s.tabs ?? []).find((tb) => tb.named && tb.name === "Forge");
+    if (open) run("tab.select", { id: open.id }); else run("tab.new", { name: "Forge", mod: "forge", props: { view: "home" } });
+  }
+  openStart(issue, root = this.root, on = this.on) { openOverlay({ mod: "forge", props: { view: "start", root, on, issue }, kind: "dialog", width: OVERLAY, height: OVERLAY }); }
   // The next verb for a track, run by an agent in that worktree.
   next(t, ctx = { root: this.root, on: this.on }) {
     if (!t.path) return { label: "Open PR", go: () => this.openGitHub(t.pr.url) };
-    if (t.agents.some((a) => a.status === "blocked")) return { label: "Answer", go: () => run("agent.focus", { terminal: t.agents.find((a) => a.status === "blocked").address }) };
-    if (t.agents.some((a) => a.status === "working")) return { label: "Open tab", go: () => run("agent.focus", { terminal: t.agents.find((a) => a.status === "working").address }) };
+    const a = lead(t); // blocked first, then working: the same pick as the row's chip and reason
+    if (a?.status === "blocked") return { label: "Answer", go: () => run("agent.focus", { terminal: a.address }) };
+    if (a?.status === "working") return { label: "Open tab", go: () => run("agent.focus", { terminal: a.address }) };
     if (t.merged) { // Herdr's own Remove worktree dialog closes the space it is given — only when this track has one (mods/worktree/main.js:2 documents {space, folder?, action}); otherwise an agent removes it
       const sp = spaces().find((s) => s.folder === t.path && (s.machine ?? null) === (ctx.on ?? null));
       // that dialog can --force, so offer it only for a clean worktree; a dirty one goes to the agent, which never forces
@@ -370,7 +383,7 @@ export default class Forge extends View {
           .child(MONO(div()).flex_1().min_w(0).truncate().child(it.branch))
           .child(it.agents.length
             ? div().px(6).py(1).rounded(9).flex_none().text_size(10.5).bg(alpha(color, "22")).text_color(color).child(g.key === "needs" && !it.agents.some((a) => a.status === "blocked") ? "review PR" : chip(it))
-            : muted(`○ no agent · ${it.ahead} ahead · ${ago(it.at)}`))
+            : muted(["○ no agent", it.ahead == null ? null : `${it.ahead} ahead`, ago(it.at)].filter(Boolean).join(" · "))) // ahead null: unknown, say nothing (#19)
           .when(it.progress?.total, (e) => e.child(muted(`${it.progress.done}/${it.progress.total}`)))
           .when(it.pr, (e) => e.child(this.link(t, `h-pr-${key}`, `PR #${it.pr.number}`, it.pr.url))))
         .when(nx, (e) => e.child(this.button(t, `h-nx-${key}`, nx.label, nx.go, g.key !== "done")));
@@ -384,7 +397,7 @@ export default class Forge extends View {
 
         v_flex().gap(2)
           .child(h_flex().px(8).pb(4).gap(6).items_center()
-            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(`${g.title.toUpperCase()} · ${g.items.length}${g.key === "done" ? DONE_SUFFIX : ""}`)))
+            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(`${g.title.toUpperCase()} · ${g.items.length}`)))
           .children(g.items.length ? g.items.map((it) => item(g, it)) : [this.empty(t, "nothing")])
           .when(g.key === "planned", (el) => el.child(h_flex().px(8).py(4).gap(8).items_center().flex_wrap().text_size(11.5).text_color(t.muted)
             .child(div().child("Backlogs:"))
@@ -401,7 +414,7 @@ export default class Forge extends View {
     const wide = !this.narrow(640); // below this the KIND, PARKED FROM and BY columns go, header and rows together
     const row = (i) => {
       const tk = taken.get(i.number), k = kind(i), parked = isParked(i);
-      const from = /From (PR #\d+|review of PR #\d+)|Deferred from design ([^\s]+)|Filed from the (plan|build)/.exec(i.body ?? "")?.[0] ?? "";
+      const from = parkedFrom(i);
       return h_flex().id(`b-${i.number}`).px(8).py(6).gap(10).items_center().rounded(6).hover((e) => e.bg(t.hover)).when(tk, (e) => e.opacity(0.55))
         .child(cell(64, this.link(t, `bl-${i.number}`, `#${i.number}`, i.url)))
         .when(wide, (e) => e.child(cell(72, k ? div().px(6).rounded(9).text_size(10.5).bg(k === "bug" ? alpha(t.blocked, "22") : alpha(t.ansi5, "22")).text_color(k === "bug" ? t.blocked : t.ansi5).child(k) : div())))
@@ -519,7 +532,7 @@ export default class Forge extends View {
         if (this.editing) return;
         this.tab = k;
         if (k === "issues") cx.spawn((cx) => this.fetchIssues(cx));
-        if (k === "pr" && tr.pr) { const n = tr.pr.number; cx.spawn(async (cx) => { const r = await this.cachedGh(`prbody:${this.on ?? ""}:${this.root}:${n}`, ["pr", "view", String(n), "--json", "body"], this.root, this.on); this.prBody = r ? { n, body: r.body } : { n, body: null, failed: true }; cx.notify(); }); }
+        if (k === "pr" && tr.pr) this.fetchPrBody(cx, tr.pr.number);
         cx.notify();
       });
     const doc = (key) => {
@@ -531,7 +544,7 @@ export default class Forge extends View {
       const body = v_flex().flex_1().min_h(0).px(16).py(12).child(TextView.markdown(`doc-${key}`, d.text).selectable().scrollable());
       if (key !== "plan") return body;
       const tasks = planTasks(d.text, tr.pr?.body);
-      const blocked = tr.agents.find((a) => a.status === "blocked");
+      const blocked = lead(tr)?.status === "blocked" ? lead(tr) : null;
       return v_flex().flex_1().min_h(0)
         .when(blocked, (e) => e.child(h_flex().mx(16).mt(8).p(8).gap(8).items_center().rounded(6).bg(alpha(t.blocked, "14")).border(1).border_color(alpha(t.blocked, "66"))
           .child(div().flex_1().text_size(12).text_color(t.blocked).child("The build is waiting on you in its tab."))
