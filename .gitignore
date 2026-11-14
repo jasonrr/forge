@@ -5,3 +5,7 @@ node_modules/
 herdr/mods/forge/jsconfig.json
 herdr/mods/forge/gpui-kit.d.ts
 herdr/mods/forge/herdr.d.ts
+
+# worktree bootstrap
+.worktree-bootstrapped
+.worktree-bootstrap.log
