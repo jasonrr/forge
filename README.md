@@ -3,13 +3,15 @@
 A code factory for coding agents. One request in, a reviewed PR out:
 
 1. `/forge:brainstorm` — explore, cut scope, land an approved design in `docs/decisions/`.
-2. `/forge:plan` — turn it into a plan a zero-context agent can run (`docs/plans/`), then dispatch the build into its own worktree (Herdr app, herdr, or `EnterWorktree`).
+2. `/forge:plan` — turn it into a plan a zero-context agent can run (`docs/plans/`; review removes it before merge, so only the design in `docs/decisions/` reaches `main`), then dispatch the build into its own worktree (Herdr app, herdr, or `EnterWorktree`).
 3. `/forge:build` — task by task with fresh subagents, TDD, per-task review. The ledger is a draft PR checklist.
 4. `/forge:review-branch` — adversarial whole-branch review; p1s fixed on the PR, p2/p3 become issues.
 
 Also `/forge:start` (the entry point: an issue or a brief in, the right loop skill out), `/forge:shelve` (park a track as an issue), `/forge:debug` (root cause first) and `/forge:setup` (consent-gated session routing + reviewer lenses, written to `.claude/dev-loop.md`).
 
 State lives in git and GitHub only. Requires `gh` logged in and a GitHub remote.
+
+**Old plans in other repos:** `main` now keeps only designs. To sweep a repo's existing `docs/plans/`, paste [prompts/clean-up-plans.md](prompts/clean-up-plans.md) into an agent there. It opens a PR you review; using it is optional.
 
 ## Install
 

@@ -51,3 +51,9 @@
 - A local `exec` rejects on a missing cwd (herdr.d.ts), so a local git call that "failed" is a verdict (the folder is gone) while a remote one is not (the machine may be unreachable) → branch on `machine` before treating a rejected exec as "keep the last data".
 - `git symbolic-ref refs/remotes/origin/HEAD` happily returns a dangling target after the default branch was renamed → verify the ref it names like any other candidate before using it as the base.
 - A `null` introduced for "unknown" reaches every renderer of the field, not only the one the issue named → grep all readers before relying on one formatter to drop it.
+
+## plans-off-main (PR #41, 2026-11-19)
+
+- `git diff --name-only base...HEAD -- docs/plans` lists deleted and edited files, not just added ones → every "the branch's plan/design" lookup needs `--diff-filter=A`; this PR's own diff (adding one plan, deleting five) named six files and `git rm` failed atomically.
+- A routing rule that infers "the build already ran" from where changed files live (outside `docs/`) misfires both ways (a README edit, a docs-only build) → route on a recorded fact instead: the shelf's Stage and Done line.
+- Plan files once shipped skill text verbatim with unquoted `$(basename "$PWD")` paths → test any copy-paste shell block in a throwaway repo with a space in its name and a non-`main` default branch before shipping.
