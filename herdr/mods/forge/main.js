@@ -35,7 +35,8 @@ function location() {
 const oneByOne = async (fs) => { const out = []; for (const f of fs) out.push(await f()); return out; }; // run thunks one at a time
 const emptyData = () => ({ worktrees: [], docs: {}, prs: [], issues: [], ages: {}, ahead: {}, me: null, repoUrl: null, nwo: null, drafts: [] });
 // shared.json keys, per machine + repo root: the last loadRepo result, and the slim open-issue list. Every view paints from these first.
-const repoKey = (on, root) => `forge.repo.${on ?? ""}:${root}`, issuesKey = (on, root) => `forge.issues.${on ?? ""}:${root}`;
+// Issues belong to the GitHub repo, not the checkout: once the snapshot knows its name, every checkout of it (any machine, any clone) shares one list.
+const repoKey = (on, root) => `forge.repo.${on ?? ""}:${root}`, issuesKey = (on, root) => `forge.issues.${shared(repoKey(on, root))?.nwo ?? `${on ?? ""}:${root}`}`;
 const ISSUE_ARGS = ["issue", "list", "--state", "open", "--limit", "500", "--json", "number,title,body,url,labels,author,createdAt"];
 
 export default class Forge extends View {
@@ -262,7 +263,13 @@ export default class Forge extends View {
     this.found = h.found ?? this.found; this.meBy = h.meBy ?? {}; this.loaded = true;
   }
   // The repo Home is shown in: the one behind the space it was opened in (it is the active space whenever Home is on screen).
-  hereRepo() { const { cwd, machine } = location(); return repoFor(this.repos.map((r) => ({ root: r.root, on: r.on, worktrees: r.data.worktrees })), cwd, machine); }
+  // A space with terminals in several repos: the repo most of them sit in (ties: the first), so one `cd` elsewhere does not flip the backlog.
+  hereRepo() {
+    const known = this.repos.map((r) => ({ root: r.root, on: r.on, worktrees: r.data.worktrees })), { cwd, machine } = location(), sp = spaces().find((s) => s.active);
+    const tabs = new Set((sp?.tabs ?? []).map((tb) => tb.id)), tally = new Map();
+    for (const p of panes()) if (tabs.has(p.tab) && p.cwd) { const r = repoFor(known, p.cwd, machine); if (r) tally.set(r, (tally.get(r) ?? 0) + 1); }
+    return [...tally].sort((a, b) => b[1] - a[1])[0]?.[0] ?? repoFor(known, cwd, machine);
+  }
   // Its open issues, refetched at most once per GH_TTL; Home renders them from the shared copy (loadIssues writes it).
   // ponytail: a Home tab left open in the background keeps the active space's repo warm (one gh call a minute), which also makes Backlog and Start open fresh there.
   homeIssues(cx) {
