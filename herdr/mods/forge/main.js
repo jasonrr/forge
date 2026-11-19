@@ -82,7 +82,7 @@ export default class Forge extends View {
   // `since`: when the data last changed (an entry without one yet: its newest item). Data quiet for long stays fresh longer (cacheLife); quiet = false keeps the base ttl.
   async cachedGh(key, args, cwd, on, ttl = GH_TTL, map = (x) => x, quiet = true) {
     const k = `forge.gh.${key}`, hit = shared(k), now = Date.now();
-    if (hit && now - hit.at < cacheLife(ttl, quiet ? hit.since : null, now) - 1000) return hit.data;
+    if (hit && !this.force && now - hit.at < cacheLife(ttl, quiet ? hit.since : null, now) - 1000) return hit.data; // force: Home's Refresh button (#36 option 1)
     const data = await this.gh(args, cwd, on);
     if (data === null) return hit?.data ?? null;
     const v = map(data), same = hit && JSON.stringify(hit.data) === JSON.stringify(v);
@@ -233,6 +233,7 @@ export default class Forge extends View {
     cx.spawn(async (cx) => {
       this.homeIssues(cx); // from the snapshot's repos: the shown repo's backlog does not wait for discovery
       if (this.refreshing) return; this.refreshing = true;
+      const forced = this.force; // ponytail: a click during a running refresh is honoured by the next one (the 60 s timer), not at once
       try {
         const { repos, unreachable } = await this.discoverRepos(), slots = [], out = [];
         const noSpaces = !spaces().length; // the layout has not loaded yet (a restored Home tab at app start): a local repo known only through its space would vanish for one tick
@@ -270,7 +271,7 @@ export default class Forge extends View {
         cx.notify();
         this.warmIssues(out.filter((r) => !r.error)); // not awaited: the refresh is done, this trickles behind it
         if (spaces().length && !unreachable.size) this.prune(out); // only on a full picture: a loading layout or an unreachable machine hides repos that are still there
-      } finally { this.refreshing = false; }
+      } finally { this.refreshing = false; if (forced) this.force = false; cx.notify(); }
     });
   }
   // Home's last result in shared.json, so a new Home tab paints at once and refreshes behind it: the repo list here, each repo's data
@@ -475,7 +476,7 @@ export default class Forge extends View {
         .child(this.link(t, `h-bl-${i.number}`, "", i.url))) : [this.empty(t, "no open issues")])
       .when(open.length > BACKLOG_ROWS, (e) => e.child(this.empty(t, `+ ${open.length - BACKLOG_ROWS} more in the backlog`)));
     return v_flex().id("root").size_full().bg(t.canvas).text_size(13).text_color(t.foreground).on_size_change(this.onSize)
-      .child(this.header(t, "Home", [this.button(t, "start", "+ Start work", () => this.openStart(null, null, null), true)], "all repos"))
+      .child(this.header(t, "Home", [this.button(t, "refresh", this.force ? "Refreshing…" : "Refresh", (cx) => { this.force = true; cx.notify(); this.refreshHome(cx); }), this.button(t, "start", "+ Start work", () => this.openStart(null, null, null), true)], "all repos"))
       .when(this.homeErr, (el) => el.child(this.empty(t, this.homeErr)))
       .children(this.repos.filter((r) => r.error).map((r) => this.empty(t, `${label(r.root.split("/").pop(), r.on)}: ${r.error}`)))
       .when(!this.loaded && !this.repos.length, (el) => el.child(this.empty(t, "loading…")))
