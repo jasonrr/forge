@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { REPO_SCRIPT, parseRepo, slimIssue, repoFor } from "./model.js";
 import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, takenIssues, isParked, parkedFrom, lead, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS, slimPr, trackFor, HOME_GROUPS, homeGroups, drafts, cacheLife, newest, QUIET_CAP } from "./model.js";
 
 const WT = "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\nworktree /r/.claude/worktrees/ring\nHEAD bbb\nbranch refs/heads/feat/ring\n\nworktree /h/.herdr/worktrees/r/fix-login\nHEAD ccc\ndetached\n\nworktree /gone\nHEAD ddd\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n";
@@ -378,4 +381,54 @@ test("homeGroups: a PR-only Done copy yields to another machine's worktree track
   const g = homeGroups({ repos: [{ root: "/r", on: null, nwo: "a/r", tracks: local }, { root: "/r", on: "box", nwo: "a/r", tracks: remote }], now });
   const done = g.find((x) => x.key === "done").items;
   assert.equal(done.length, 1); assert.equal(done[0].path, "/w"); assert.equal(done[0].on, "box");
+});
+
+// --- one-exec repo read, issue cache, repo lookup ---
+test("parseRepo: sections, unreadable counts stay null, a failed status is null", () => {
+  const r = parseRepo("@@base origin/main\n@@worktrees\nworktree /r\nHEAD a\nbranch refs/heads/main\n\nworktree /w a\nHEAD b\nbranch refs/heads/feat/x\n@@status\n?? docs/plans/2026-01-01-x.md\n@@wt /w a\ndocs/decisions/2026-01-01-x.md\ndocs/plans/2026-01-01-x.md\n@@age 1700000000\n@@ahead 3\n@@design\nCloses #12\n@@wt /w2\n@@age \n@@ahead \n@@design\n");
+  assert.equal(r.base, "origin/main");
+  assert.deepEqual(parseWorktrees(r.porcelain).map((w) => w.path), ["/r", "/w a"]);
+  assert.equal(r.status, "?? docs/plans/2026-01-01-x.md");
+  assert.deepEqual(r.per["/w a"], { files: ["docs/decisions/2026-01-01-x.md", "docs/plans/2026-01-01-x.md"], age: 1700000000, ahead: 3, designText: "Closes #12" });
+  assert.deepEqual(r.per["/w2"], { files: [], age: null, ahead: null, designText: "" });
+  assert.equal(parseRepo("@@base main\n@@worktrees\nworktree /r\n@@status\n@@nostatus\n").status, null);
+});
+
+test("REPO_SCRIPT: runs against a real repo with a linked worktree (a space in its path) and parses", () => {
+  const dir = realpathSync(mkdtempSync(`${tmpdir()}/forge repo-`)), root = `${dir}/main`, wt = `${dir}/wt one`;
+  const git = (cwd, ...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", ...a], { cwd, stdio: "pipe" }).toString();
+  try {
+    mkdirSync(root); git(root, "init", "-q"); writeFileSync(`${root}/a`, "a"); git(root, "add", "."); git(root, "commit", "-qm", "init");
+    git(root, "worktree", "add", "-q", "-b", "feat/x", wt);
+    mkdirSync(`${wt}/docs/decisions`, { recursive: true }); mkdirSync(`${wt}/docs/plans`, { recursive: true });
+    writeFileSync(`${wt}/docs/decisions/2026-01-01-x.md`, "# X\n\nprose\nCloses #12 and #13\n"); git(wt, "add", "."); git(wt, "commit", "-qm", "design");
+    writeFileSync(`${wt}/docs/plans/2026-01-01-x.md`, "plan"); // untracked
+    mkdirSync(`${root}/docs/decisions`, { recursive: true }); writeFileSync(`${root}/docs/decisions/2026-02-02-draft.md`, "d");
+    const r = parseRepo(execFileSync("sh", ["-c", REPO_SCRIPT], { cwd: root }).toString());
+    assert.equal(r.base, "main");
+    assert.deepEqual(parseWorktrees(r.porcelain).map((w) => [w.path, w.branch]), [[root, "main"], [wt, "feat/x"]]);
+    assert.deepEqual(drafts(r.status), [{ slug: "draft", design: "docs/decisions/2026-02-02-draft.md", plan: null }]);
+    const p = r.per[wt];
+    assert.deepEqual(p.files, ["docs/decisions/2026-01-01-x.md", "docs/plans/2026-01-01-x.md"]);
+    assert.equal(p.ahead, 1); assert.ok(p.age > 1600000000); assert.equal(p.designText, "Closes #12 and #13");
+    assert.throws(() => execFileSync("sh", ["-c", REPO_SCRIPT], { cwd: dir, stdio: "pipe" })); // not a repo: non-zero, never an empty success
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("slimIssue keeps what the views read: first body line, the parked-from and shelf-branch lines", () => {
+  const i = { number: 7, title: "Shelved: ring", url: "u", createdAt: "2026-01-01T00:00:00Z", labels: [{ name: "shelved", color: "x" }], author: { login: "me", id: 1 }, body: "First line\n\nlots of prose\nBranch: `feat/ring`\nFrom review of PR #9\nmore" };
+  const s = slimIssue(i);
+  assert.equal(s.body, "First line\nBranch: `feat/ring`\nFrom review of PR #9");
+  assert.equal(shelfBranch(s), "feat/ring"); assert.equal(parkedFrom(s), parkedFrom(i)); assert.equal(isParked(s), true);
+  assert.deepEqual(s.labels, [{ name: "shelved" }]); assert.deepEqual(s.author, { login: "me" });
+  assert.equal(slimIssue({ number: 1, title: "t" }).body, "");
+});
+
+test("repoFor: checkout or linked worktree, deepest wins, machine must match", () => {
+  const repos = [{ root: "/c/forge", on: null, worktrees: [{ path: "/c/forge" }, { path: "/h/.herdr/worktrees/forge/feat-x" }] }, { root: "/c", on: null, worktrees: [] }, { root: "/c/forge", on: "m", worktrees: [] }];
+  assert.equal(repoFor(repos, "/c/forge/src", null), repos[0]);
+  assert.equal(repoFor(repos, "/h/.herdr/worktrees/forge/feat-x/docs", null), repos[0]);
+  assert.equal(repoFor(repos, "/c/other", null), repos[1]);
+  assert.equal(repoFor(repos, "/c/forge", "m"), repos[2]);
+  assert.equal(repoFor(repos, "/elsewhere", null), null); assert.equal(repoFor(repos, null, null), null);
 });
