@@ -135,7 +135,7 @@ export default class Forge extends View {
     const wt = parseWorktrees(list.out);
     const docs = {}, ages = {}, ahead = {};
     const one = async (w) => {
-      const changed = await git(["diff", "--name-only", `${base}...HEAD`, "--", "docs/decisions", "docs/plans"], w.path);
+      const changed = await git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`, "--", "docs/decisions", "docs/plans"], w.path);
       const untracked = await git(["ls-files", "--others", "--exclude-standard", "docs/decisions", "docs/plans"], w.path);
       if (changed.failed || untracked.failed) { if (prev.docs[w.path]) { docs[w.path] = prev.docs[w.path]; ages[w.path] = prev.ages[w.path] ?? 0; ahead[w.path] = prev.ahead[w.path] ?? null; } return; } // an exec that could not run is not "no docs": keep what we had
       const files = `${changed.out}\n${untracked.out}`.split("\n").filter(Boolean);
