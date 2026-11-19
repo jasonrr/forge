@@ -235,3 +235,70 @@ export function newest(list) {
   const ts = list.map((x) => Date.parse(x?.updatedAt ?? x?.mergedAt ?? x?.closedAt ?? x?.createdAt)).filter((n) => n > 0);
   return ts.length ? Math.max(...ts) : null;
 }
+
+// Everything loadRepo needs from git, in ONE exec per repo (was 6 + 4 per worktree; each exec is a process, and a round trip on a
+// connected machine). Sections start with "@@name"; parseRepo reads them. ponytail: sh, so unix only — like the mod's `open` calls.
+export const REPO_SCRIPT = `g() { git --no-optional-locks -c core.fsmonitor=false "$@"; }
+b=main
+for c in "$(g symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)" origin/main main master; do
+  [ -n "$c" ] && g rev-parse --verify -q "$c" >/dev/null 2>&1 && { b=$c; break; }
+done
+wl=$(g worktree list --porcelain) || exit 3
+printf '@@base %s\\n@@worktrees\\n%s\\n@@status\\n' "$b" "$wl"
+g -c core.quotePath=false status --porcelain --untracked-files=all -- docs/decisions docs/plans || echo '@@nostatus'
+printf '%s\\n' "$wl" | sed -n 's/^worktree //p' | sed 1d | while IFS= read -r w; do
+  [ -d "$w" ] || continue
+  printf '@@wt %s\\n' "$w"
+  f=$(g -C "$w" diff --name-only --diff-filter=A "$b...HEAD" -- docs/decisions docs/plans 2>/dev/null; g -C "$w" ls-files --others --exclude-standard docs/decisions docs/plans 2>/dev/null)
+  printf '%s\\n' "$f"
+  printf '@@age %s\\n@@ahead %s\\n@@design\\n' "$(g -C "$w" log -1 --format=%ct 2>/dev/null)" "$(g -C "$w" rev-list --count "$b..HEAD" 2>/dev/null)"
+  d=$(printf '%s\\n' "$f" | grep -m1 '^docs/decisions/')
+  [ -n "$d" ] && grep '#[0-9]' "$w/$d"
+done
+exit 0`;
+// -> { base, porcelain, status (null: git status could not run), per: { <worktree path>: { files, age, ahead, designText } } }.
+// age/ahead null = could not read (the caller keeps what it had). designText holds only the design's lines with a #ref: all tracks() reads.
+export function parseRepo(out) {
+  const r = { base: "main", porcelain: "", status: "", per: {} }, wl = [], st = [];
+  let sec = null, cur = null;
+  const num = (v) => (/^\d+$/.test(v) ? Number(v) : null);
+  for (const line of (out ?? "").split("\n")) {
+    const m = /^@@(base|worktrees|status|nostatus|wt|age|ahead|design)(?: (.*))?$/.exec(line);
+    if (!m) {
+      if (sec === "worktrees") wl.push(line); else if (sec === "status" && line) st.push(line);
+      else if (sec === "wt" && line) cur.files.push(line); else if (sec === "design" && line) cur.design.push(line);
+      continue;
+    }
+    const [, k, v = ""] = m;
+    if (k === "base") r.base = v || "main";
+    else if (k === "nostatus") r.status = null;
+    else if (k === "wt") r.per[v] = cur = { files: [], age: null, ahead: null, design: [] };
+    else if (k === "age") cur.age = num(v);
+    else if (k === "ahead") cur.ahead = num(v);
+    sec = k === "nostatus" ? null : k;
+  }
+  r.porcelain = wl.join("\n");
+  if (r.status !== null) r.status = st.join("\n");
+  for (const p of Object.values(r.per)) { p.designText = p.design.join("\n"); delete p.design; }
+  return r;
+}
+
+// The issue list's cached copy (shared.json, painted before the fresh fetch lands): the fields the views read, and of the body only
+// its first line (the row's subtitle) plus the lines parkedFrom() and shelfBranch() match. Body search works on the fresh list only.
+export function slimIssue(i) {
+  const lines = (i.body ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const keep = lines.filter((l, n) => n === 0 || /Branch: `/.test(l) || parkedFrom({ body: l }) !== "").map((l) => l.slice(0, 240));
+  return { number: i.number, title: i.title, url: i.url, createdAt: i.createdAt, labels: (i.labels ?? []).map((l) => ({ name: l.name })), author: i.author ? { login: i.author.login } : null, body: keep.join("\n") };
+}
+
+// The known repo ({root, on, worktrees}) whose checkout or linked worktree holds cwd on that machine, deepest match first; or null.
+// Lets a view opened from a folder paint that repo's last snapshot before git has answered.
+export function repoFor(repos, cwd, on) {
+  if (!cwd) return null;
+  let best = null, len = -1;
+  for (const r of repos) {
+    if ((r.on ?? null) !== (on ?? null)) continue;
+    for (const p of [r.root, ...(r.worktrees ?? []).map((w) => w.path)]) if (p && under(cwd, p) && p.length > len) { best = r; len = p.length; }
+  }
+  return best;
+}
