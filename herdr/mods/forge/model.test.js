@@ -415,10 +415,11 @@ test("REPO_SCRIPT: runs against a real repo with a linked worktree (a space in i
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("slimIssue keeps what the views read: first body line, the parked-from and shelf-branch lines", () => {
+test("slimIssue keeps what the views read, with the whole body (search), cut only past the cap", () => {
   const i = { number: 7, title: "Shelved: ring", url: "u", createdAt: "2026-01-01T00:00:00Z", labels: [{ name: "shelved", color: "x" }], author: { login: "me", id: 1 }, body: "First line\n\nlots of prose\nBranch: `feat/ring`\nFrom review of PR #9\nmore" };
   const s = slimIssue(i);
-  assert.equal(s.body, "First line\nBranch: `feat/ring`\nFrom review of PR #9");
+  assert.equal(s.body, i.body); assert.equal(slimIssue({ body: "x".repeat(30000) }).body.length, 20000);
+  assert.equal(Array.from({ length: 101 }, () => ({ body: "x".repeat(5000) })).map(slimIssue)[0].body.length, 300); // a long list keeps short bodies
   assert.equal(shelfBranch(s), "feat/ring"); assert.equal(parkedFrom(s), parkedFrom(i)); assert.equal(isParked(s), true);
   assert.deepEqual(s.labels, [{ name: "shelved" }]); assert.deepEqual(s.author, { login: "me" });
   assert.equal(slimIssue({ number: 1, title: "t" }).body, "");

@@ -283,12 +283,14 @@ export function parseRepo(out) {
   return r;
 }
 
-// The issue list's cached copy (shared.json, painted before the fresh fetch lands): the fields the views read, and of the body only
-// its first line (the row's subtitle) plus the lines parkedFrom() and shelfBranch() match. Body search works on the fresh list only.
-export function slimIssue(i) {
-  const lines = (i.body ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
-  const keep = lines.filter((l, n) => n === 0 || /Branch: `/.test(l) || parkedFrom({ body: l }) !== "").map((l) => l.slice(0, 240));
-  return { number: i.number, title: i.title, url: i.url, createdAt: i.createdAt, labels: (i.labels ?? []).map((l) => ({ name: l.name })), author: i.author ? { login: i.author.login } : null, body: keep.join("\n") };
+// The issue list's cached copy (shared.json, painted before the fresh fetch lands): only the fields the views read. The body stays
+// whole, so the backlog's search matches bodies from the first frame, not only once the fresh list lands.
+// ponytail: ~100 KB in shared.json for a repo with 60 long issues. A long list (an upstream repo with 500 open issues was seen live) keeps
+// only BODY_LONG chars of each body, so one repo cannot push shared.json past what Herdr reads back; search then misses the rest until the fetch lands.
+export const BODY_CAP = 20000, BODY_LONG = 300, LONG_LIST = 100;
+export function slimIssue(i, _n, all) {
+  const cap = (all?.length ?? 0) > LONG_LIST ? BODY_LONG : BODY_CAP;
+  return { number: i.number, title: i.title, url: i.url, createdAt: i.createdAt, labels: (i.labels ?? []).map((l) => ({ name: l.name })), author: i.author ? { login: i.author.login } : null, body: (i.body ?? "").slice(0, cap) };
 }
 
 // The open space for a checkout or worktree `path` on machine `on`, or null. A space's `folder` is only where its new terminals start:
