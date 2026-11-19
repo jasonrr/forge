@@ -31,3 +31,5 @@ None.
 - T2 commit c5b8d3c — deviation: same in-session note as T1 — parked: none
 - T3 commit ab37492 — deviation: the prompt's last step tells the user the worktree path to remove after merge, instead of telling the agent to remove it once merged (the agent is gone by then) — parked: none
 - T4 commit 87f9dc4 — deviation: none — parked: none
+- review commit 8d0f6b3 — deviation: every branch doc lookup got `--diff-filter=A` (start, shelve, review-branch, herdr main.js); the "design + non-doc changes → reopen PR" rule became a shelf-based rule; cleanup prompt hardened (default-branch fallback, quoted path, explicit push, unrelated test failures reported not fixed) — parked: https://github.com/jasonrr/forge/issues/42
+- review commit e578d06 — deviation: a finished shelf (Stage Review or all tasks done) resumes straight into review whether or not the plan or design is on the branch — parked: none
