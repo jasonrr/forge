@@ -5,7 +5,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
 import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, setShared, shared } from "herdr";
 import { writeFile, mkdir, readdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app, reads under home (AGENTS.md "Other built-ins")
-import { nextLabel, chip, lead, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, parkedFrom, branchFor, shelfBranch, slimPr, trackFor, homeGroups, drafts, DONE_WINDOW_MS, cacheLife, newest, REPO_SCRIPT, parseRepo, slimIssue, repoFor } from "./model.js";
+import { nextLabel, chip, lead, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, parkedFrom, branchFor, shelfBranch, slimPr, trackFor, homeGroups, drafts, DONE_WINDOW_MS, cacheLife, newest, REPO_SCRIPT, parseRepo, slimIssue, repoFor, spaceFor } from "./model.js";
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const PR_FIELDS = "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author";
@@ -200,7 +200,8 @@ export default class Forge extends View {
       const root = r.out.replace(/\/\.git$/, ""); seen.set(`${on ?? ""}\n${root}`, { root, on: on ?? null }); return true;
     };
     const base = `${home()}/.herdr/worktrees`, local = [], remote = {};
-    for (const s of spaces()) if (s.folder) (s.machine ? (remote[s.machine] ??= []) : local).push(s.folder);
+    const ps = panes(); // a space's folder is often the home folder; where its terminals sit names the repo (add() skips a folder already tried)
+    for (const s of spaces()) { const tabs = new Set((s.tabs ?? []).map((tb) => tb.id)); for (const f of new Set([s.folder, ...ps.filter((p) => tabs.has(p.tab)).map((p) => p.cwd)])) if (f) (s.machine ? (remote[s.machine] ??= []) : local).push(f); }
     const listed = (await readTextFile(`${appHome()}/forge-repos`).catch(() => null)) ?? "";
     for (const line of listed.split("\n")) { const p = line.replace(/#.*/, "").trim(); if (p) local.push(p.replace(/^~(?=\/|$)/, home())); }
     const wtDir = async (e) => {
@@ -345,9 +346,11 @@ export default class Forge extends View {
   // Harness-agnostic: the agent is Herdr's most-picked installed one (knownAgents is ordered that way); no model choice here.
   async openAgent(path, task, argv, on = this.on) {
     argv ??= (await knownAgents({ on })).find((a) => a.installed)?.run ?? ["claude"];
-    const space = spaces().find((s) => s.folder === path && (s.machine ?? null) === (on ?? null)); // ponytail: folder match; a space made by Start/worktree mod has exactly this folder
+    const space = this.spaceAt(path, on);
     if (space) run("tab.new", { space: space.id, argv, task }); else run("space.new", { folder: path, machine: on ?? "", argv, task });
   }
+  // The open space of a checkout or worktree (model.js spaceFor): by its terminals, not only its folder, so a row or button never opens a second space for a track that has one.
+  spaceAt(path, on) { return spaceFor(spaces(), panes(), [...this.data.worktrees, ...this.repos.flatMap((r) => r.data.worktrees)].map((w) => w.path), path, on); }
   openGitHub(url) { exec("open", [url]); }
   openHome() { // one Home: select the open one (by the name openHome gives it, on any space) before making another
     const open = spaces().flatMap((s) => s.tabs ?? []).find((tb) => tb.named && tb.name === "Forge");
@@ -361,7 +364,7 @@ export default class Forge extends View {
     if (a?.status === "blocked") return { label: "Answer", go: () => run("agent.focus", { terminal: a.address }) };
     if (a?.status === "working") return { label: "Open tab", go: () => run("agent.focus", { terminal: a.address }) };
     if (t.merged) { // Herdr's own Remove worktree dialog closes the space it is given — only when this track has one (mods/worktree/main.js:2 documents {space, folder?, action}); otherwise an agent removes it
-      const sp = spaces().find((s) => s.folder === t.path && (s.machine ?? null) === (ctx.on ?? null));
+      const sp = this.spaceAt(t.path, ctx.on);
       // that dialog can --force, so offer it only for a clean worktree; a dirty one goes to the agent, which never forces
       return { label: "Remove worktree", go: async () => { const st = sp ? await this.git(["status", "--porcelain"], t.path, ctx.on) : null; return st?.ok && !st.out ? openOverlay({ mod: "worktree", props: { action: "remove", space: sp.id, folder: t.path }, kind: "dialog" })
         : this.openAgent(ctx.root, `This branch is merged. Run: git worktree remove "${t.path}" (never --force; if it refuses, say why and stop), then git branch -d ${t.branch} (never -D). Then stop.`, undefined, ctx.on); } };
@@ -398,7 +401,7 @@ export default class Forge extends View {
     const muted = (text) => MONO(div()).flex_none().text_size(11).text_color(t.muted).child(text);
     const row = (id) => h_flex().id(id).px(8).py(5).gap(10).items_center().min_w(0).rounded(6).hover((e) => e.bg(t.hover));
     const focusSpace = (it) => () => { // a row jumps to its worktree's space, opening one if it has none
-      const sp = spaces().find((s) => s.folder === it.path && (s.machine ?? null) === (it.on ?? null));
+      const sp = this.spaceAt(it.path, it.on);
       if (sp) run("space.select", { id: sp.id }); else run("space.new", { folder: it.path, machine: it.on ?? "" });
     };
     const item = (g, it) => {
@@ -718,7 +721,7 @@ export default class Forge extends View {
       if (r.code !== 0) { this.busy = (r.stderr || "git worktree add failed").trim(); cx.notify(); return; }
       const extra = this.mode === "issue" ? "" : this.brief.value().trim();
       const task = issue ? `/forge:start #${issue.number}` : `/forge:start ${title}${extra ? `\n\n${extra}` : ""}${this.alsoIssue ? "\n\nAlso open a GitHub issue for this so it shows in the backlog if it stalls." : ""}`;
-      const hadSpace = spaces().some((s) => s.folder === path && (s.machine ?? null) === (this.on ?? null)); // only a fresh space.new focuses the new space; an existing one goes through tab.new, whose focus is undocumented
+      const hadSpace = !!this.spaceAt(path, this.on); // only a fresh space.new focuses the new space; an existing one goes through tab.new, whose focus is undocumented
       await this.openAgent(path, task, argv);
       if (!hadSpace) run("pane.split", { direction: "right", mod: "forge", props: { view: "track", track: path, root: this.root, on: this.on } }); // run() returns no ids: this splits the focused pane, which openAgent's space.new/tab.new just made
       this.dismiss();

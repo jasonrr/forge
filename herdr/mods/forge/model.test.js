@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { REPO_SCRIPT, parseRepo, slimIssue, repoFor } from "./model.js";
+import { REPO_SCRIPT, parseRepo, slimIssue, repoFor, spaceFor } from "./model.js";
 import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, takenIssues, isParked, parkedFrom, lead, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS, slimPr, trackFor, HOME_GROUPS, homeGroups, drafts, cacheLife, newest, QUIET_CAP } from "./model.js";
 
 const WT = "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\nworktree /r/.claude/worktrees/ring\nHEAD bbb\nbranch refs/heads/feat/ring\n\nworktree /h/.herdr/worktrees/r/fix-login\nHEAD ccc\ndetached\n\nworktree /gone\nHEAD ddd\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n";
@@ -422,6 +422,18 @@ test("slimIssue keeps what the views read: first body line, the parked-from and 
   assert.equal(shelfBranch(s), "feat/ring"); assert.equal(parkedFrom(s), parkedFrom(i)); assert.equal(isParked(s), true);
   assert.deepEqual(s.labels, [{ name: "shelved" }]); assert.deepEqual(s.author, { login: "me" });
   assert.equal(slimIssue({ number: 1, title: "t" }).body, "");
+});
+
+test("spaceFor: folder match first, else the space whose terminals sit in that worktree; never another machine's", () => {
+  const spaces = [{ id: "a", folder: "/home", machine: null, tabs: [{ id: "t1" }] }, { id: "b", folder: "/home", machine: null, tabs: [{ id: "t2" }] }, { id: "c", folder: "/r/wt", machine: "m", tabs: [{ id: "t3" }] }, { id: "d", folder: "/x", machine: null, tabs: [] }];
+  const panes = [{ tab: "t1", cwd: "/r/src" }, { tab: "t2", cwd: "/r/.claude/worktrees/wt/docs" }, { tab: "t2", cwd: null }], wts = ["/r", "/r/.claude/worktrees/wt"];
+  assert.equal(spaceFor(spaces, panes, wts, "/x", null).id, "d"); // its folder
+  assert.equal(spaceFor(spaces, panes, wts, "/r/.claude/worktrees/wt", null).id, "b"); // folder is home, a terminal is in the worktree
+  assert.equal(spaceFor(spaces, panes, wts, "/r", null).id, "a"); // main checkout: not the space whose terminal is in the nested worktree
+  assert.equal(spaceFor(spaces, panes, wts, "/r/wt", null), null); assert.equal(spaceFor(spaces, panes, wts, "/r/wt", "m").id, "c");
+  assert.equal(spaceFor(spaces, panes, [], "/nowhere", null), null);
+  const wrong = [{ id: "e", folder: "/r", machine: null, tabs: [{ id: "t9" }] }]; // its folder names the repo, its terminal is elsewhere: not that repo's space
+  assert.equal(spaceFor(wrong, [{ tab: "t9", cwd: "/other" }], wts, "/r", null), null);
 });
 
 test("repoFor: checkout or linked worktree, deepest wins, machine must match", () => {
