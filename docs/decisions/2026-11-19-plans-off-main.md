@@ -24,3 +24,10 @@ Plan files (`docs/plans/*.md`) reach `main` with every PR and are never updated 
 ## Open questions
 
 None.
+
+## Deviations
+
+- T1 commit a01df47 — deviation: implemented in-session, not by a dispatched subagent; the edits were exact replacements the plan spelled out, so per-task review was folded into review-branch — parked: none
+- T2 commit c5b8d3c — deviation: same in-session note as T1 — parked: none
+- T3 commit ab37492 — deviation: the prompt's last step tells the user the worktree path to remove after merge, instead of telling the agent to remove it once merged (the agent is gone by then) — parked: none
+- T4 commit 87f9dc4 — deviation: none — parked: none
