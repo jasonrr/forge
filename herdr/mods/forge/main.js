@@ -10,7 +10,7 @@ import { nextLabel, chip, lead, parseWorktrees, kind, planTasks, tracks, agentsO
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const PR_FIELDS = "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author";
 const GH_TTL = 60000; // gh results are cached across all forge views for this long (shared()); GraphQL budget: 5000 pts/h per user
-const DAY = 86400000;
+const DAY = 86400000, WARM = 30 * 60000;
 const OVERLAY = 720; // the Start dialog, px square; mod.json "overlay" (the mod.open path) must say the same — JSON, so it cannot import this
 const MONO = (el) => el.font_family(settings().font_family); // the terminal's mono font (AGENTS.md: settings().font_family)
 const ago = (sec) => { const d = Math.max(0, Date.now() / 1000 - sec); return d < 3600 ? `${Math.floor(d / 60)}m` : d < 86400 ? `${Math.floor(d / 3600)}h` : `${Math.floor(d / 86400)}d`; };
@@ -108,8 +108,15 @@ export default class Forge extends View {
   async loadIssues(root, on) {
     const got = await this.gh(ISSUE_ARGS, root, on); if (!got) return null;
     const slim = got.map(slimIssue), k = issuesKey(on, root);
-    if (JSON.stringify(shared(k)?.data) !== JSON.stringify(slim)) setShared(k, { at: Date.now(), data: slim });
+    const hit = shared(k);
+    if (JSON.stringify(hit?.data) !== JSON.stringify(slim) || Date.now() - (hit?.at ?? 0) > 5 * 60000) setShared(k, { at: Date.now(), data: slim }); // unchanged: `at` moves at most every 5 min (each write re-renders every mod)
     return got;
+  }
+  // Home keeps every repo's issue copy from going cold, so a backlog or Start opened anywhere paints at once, first open included:
+  // a copy that is missing or older than WARM is refetched, one repo at a time. ponytail: ~2 gh calls an hour per repo while a Home tab exists.
+  async warmIssues(repos) {
+    if (this.warming) return; this.warming = true;
+    try { for (const { root, on } of repos) if (Date.now() - (shared(issuesKey(on, root))?.at ?? 0) > WARM) await this.loadIssues(root, on); } finally { this.warming = false; }
   }
 
   // Every data reset also forgets the issues cache: an emptied list must never pass for a fresh fetch.
@@ -247,6 +254,7 @@ export default class Forge extends View {
         this.saveHome();
         this.homeIssues(cx); // a repo the snapshot did not know yet
         cx.notify();
+        this.warmIssues(out.filter((r) => !r.error)); // not awaited: the refresh is done, this trickles behind it
       } finally { this.refreshing = false; }
     });
   }
