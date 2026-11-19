@@ -291,6 +291,19 @@ export function slimIssue(i) {
   return { number: i.number, title: i.title, url: i.url, createdAt: i.createdAt, labels: (i.labels ?? []).map((l) => ({ name: l.name })), author: i.author ? { login: i.author.login } : null, body: keep.join("\n") };
 }
 
+// The open space for a checkout or worktree `path` on machine `on`, or null. A space's `folder` is only where its new terminals start:
+// seen live it is the home folder for most spaces, and another repo's folder for some, while every terminal sits in the repo. A folder
+// match alone opened a second space for a track that already had one. So the terminals decide: a space with a terminal whose deepest
+// known worktree is `path` (a terminal in a linked worktree nested under the main checkout belongs to the worktree, not to main).
+// The folder counts only for a space with no terminal folder yet (just made).
+export function spaceFor(spaces, panes, worktreePaths, path, on) {
+  const ss = spaces.filter((s) => (s.machine ?? null) === (on ?? null));
+  const paths = [...new Set([path, ...worktreePaths])];
+  const owner = (cwd) => paths.filter((w) => under(cwd, w)).sort((a, b) => b.length - a.length)[0];
+  const cwds = (s) => { const tabs = new Set((s.tabs ?? []).map((t) => t.id)); return panes.filter((p) => tabs.has(p.tab) && p.cwd).map((p) => p.cwd); };
+  return ss.find((s) => cwds(s).some((c) => owner(c) === path)) ?? ss.find((s) => s.folder === path && !cwds(s).length) ?? null;
+}
+
 // The known repo ({root, on, worktrees}) whose checkout or linked worktree holds cwd on that machine, deepest match first; or null.
 // Lets a view opened from a folder paint that repo's last snapshot before git has answered.
 export function repoFor(repos, cwd, on) {
