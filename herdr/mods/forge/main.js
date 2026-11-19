@@ -4,7 +4,7 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
 import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, setShared, shared } from "herdr";
-import { writeFile, mkdir, readdir } from "fs/promises"; // allowed: writes under ~/.config/herdr-app, reads under home (AGENTS.md "Other built-ins")
+import { writeFile, mkdir, readdir, readFile } from "fs/promises"; // allowed: writes under ~/.config/herdr-app, reads under home (AGENTS.md "Other built-ins")
 import { nextLabel, chip, lead, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, parkedFrom, branchFor, shelfBranch, slimPr, trackFor, homeGroups, drafts, DONE_WINDOW_MS, cacheLife, newest, REPO_SCRIPT, parseRepo, slimIssue, repoFor, spaceFor } from "./model.js";
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
@@ -111,6 +111,19 @@ export default class Forge extends View {
     const hit = shared(k);
     if (JSON.stringify(hit?.data) !== JSON.stringify(slim) || Date.now() - (hit?.at ?? 0) > 5 * 60000) setShared(k, { at: Date.now(), data: slim }); // unchanged: `at` moves at most every 5 min (each write re-renders every mod)
     return got;
+  }
+  // shared.json only grows: entries for repos Home no longer lists (a removed worktree's root, a dropped machine) and issue copies
+  // under a superseded key stay forever, and every setShared rewrites the whole file. Once per Home copy, after a full load, null them
+  // (verified live with a probe mod: shared() then reads as absent; read with fs readFile — readTextFile did not return this file). ponytail: the "key": null stubs stay in the file; Herdr has no delete.
+  async prune(repos) {
+    if (this.pruned) return; this.pruned = true;
+    let all; try { all = JSON.parse(await readFile(`${appHome()}/shared.json`, "utf8")); } catch { return; } // unreadable or mid-write: skip
+    const live = new Set(repos.map((r) => `${r.on ?? ""}:${r.root}`)), nwos = new Set(repos.map((r) => r.data.nwo).filter(Boolean));
+    for (const [k, v] of Object.entries(all ?? {})) {
+      if (v === null) continue;
+      const m = /^forge\.(gh\.pr-open:|gh\.pr-merged:|gh\.repo:|repo\.|issues\.)(.*)$/.exec(k); if (!m) continue;
+      if (m[1] === "issues." ? !nwos.has(m[2]) && !(live.has(m[2]) && !repos.find((r) => `${r.on ?? ""}:${r.root}` === m[2])?.data.nwo) : !live.has(m[2])) setShared(k, null);
+    }
   }
   // Home keeps every repo's issue copy from going cold, so a backlog or Start opened anywhere paints at once, first open included:
   // a copy that is missing or older than WARM is refetched, one repo at a time. ponytail: ~2 gh calls an hour per repo while a Home tab exists.
@@ -256,6 +269,7 @@ export default class Forge extends View {
         this.homeIssues(cx); // a repo the snapshot did not know yet
         cx.notify();
         this.warmIssues(out.filter((r) => !r.error)); // not awaited: the refresh is done, this trickles behind it
+        if (spaces().length && !unreachable.size) this.prune(out); // only on a full picture: a loading layout or an unreachable machine hides repos that are still there
       } finally { this.refreshing = false; }
     });
   }
