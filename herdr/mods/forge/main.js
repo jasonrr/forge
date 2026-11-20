@@ -55,7 +55,7 @@ export default class Forge extends View {
     if (r === "home") { // Home spans every repo: no this.root, no this.here
       this.cur = null; this.order = []; this.doneOpen = false; this.scroll = ScrollHandle.new(); // Home's selection (a row key), the rows in screen order, the Done fold, the list's scroll
       this.keys = cx.focus_handle(); this.reveal = false;
-      cx.spawn(async (cx) => { await cx.sleep(100); try { this.keys.focus(); } catch {} }); // Home takes the keyboard once its first render has attached the handle (track_focus); if that fails, the first click does (root on_mouse_down)
+      cx.spawn(async (cx) => { await cx.sleep(100); if (focused()?.terminal) return; try { this.keys.focus(); } catch {} }); // Home takes the keyboard once its first render has attached the handle (track_focus), unless a terminal has it (a Home restored in a background tab must not take the keys from the terminal in front); otherwise the first click does (root on_mouse_down)
       this.seedHome();
       this.refreshHome(cx);
       cx.timer.every(GH_TTL, (cx) => { if (!this.refreshing) this.refreshHome(cx); });
