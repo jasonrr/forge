@@ -85,3 +85,4 @@ None.
 ## Deviations
 
 - T1 commit 1ef1211 — deviation: none (review was a mechanical verbatim diff against cockpit's ui.js and icons, no reviewer subagent) — parked: none
+- T2 commit ab47d23 — deviation: none (review p3, not fixed: a merged track's row key changes from worktree path to PR url when its worktree is removed, so the selection falls back to the first row — acceptable after a deliberate removal) — parked: none
