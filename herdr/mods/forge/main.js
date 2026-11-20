@@ -1,5 +1,5 @@
 // forge: the dev-loop's work, one track per worktree of the shown repo. Views in one mod, chosen by route() from props():
-// Home {view:"home"}; track pane {view:"track"} or {track}; backlog {view:"backlog"}; Start ({view:"start"} or the mod.open overlay); and the "moved" notice for an old docked block. Stored state: only the track pin (localStorage) and the shared gh cache (shared()); everything else is derived
+// Home {view:"home"}; track pane {view:"track"} or {track}; backlog {view:"backlog"}; Start ({view:"start"} or the mod.open overlay); and the "moved" notice for an old docked block. Stored state: only the shared gh cache (shared()); everything else is derived
 // from git worktrees, the docs on each branch, gh PRs/issues and the host's agents.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
@@ -62,9 +62,7 @@ export default class Forge extends View {
       return;
     }
     if (!props()?.root) {
-      const pin = r === "track" && !props()?.track ? this.savedPin() : null; // a restarted key-opened pane stays on its pinned repo, wherever focus is now
-      this.fromPin = !!pin;
-      this.here = pin ? { cwd: pin.path, machine: pin.on ?? null } : location();
+      this.here = location();
       const k = repoFor(this.knownRepos(), this.here.cwd, this.here.machine); // a guess from the last snapshot; refresh() asks git and corrects it
       if (k) { this.root = k.root; this.on = k.on; }
     }
@@ -153,7 +151,7 @@ export default class Forge extends View {
             const up = await exec("true", [], { on: machine }).then(() => true, () => false); if (seq !== this.seq) return;
             this.error = (up ? "git did not answer" : `can't reach ${machine}`) + (this.root ? " — showing the last data" : ""); cx.notify(); return;
           }
-          if (!common.ok) { this.root = null; this.resetData(); this.watch([], cx, machine); this.error = this.fromPin ? "This track's worktree is gone (shelved or removed)." : "no git repo in this space"; this.findRepos(cx); cx.notify(); return; } // a pin names a worktree that was removed: say that, not "no repo"
+          if (!common.ok) { this.root = null; this.resetData(); this.watch([], cx, machine); this.error = "no git repo in this space"; this.findRepos(cx); cx.notify(); return; }
           const r0 = common.out.replace(/\/\.git$/, "");
           if (r0 !== this.root) { this.root = r0; this.resetData(); this.seed(); } // another repo's PRs, issues and url must never show; its own last snapshot may
         }
@@ -329,15 +327,13 @@ export default class Forge extends View {
     const ag = agentsOn(agents(), spaces(), this.on).map((a) => ({ address: a.address, status: a.status, cwd: ps.find((p) => p.pane === a.pane)?.cwd ?? null }));
     return tracks({ ...this.data, agents: ag });
   }
-  // Start passes props.track. A key-opened pane (props {view:"track"}) resolves once from where the person was (this.here)
-  // and remembers it, with its machine, in this copy's localStorage (per copy — verified live): a restart with focus elsewhere
-  // re-resolves the same repo from the pin (init). ponytail: a cached one-time resolution, not tracked state; if it names a removed worktree the pane says so.
-  savedPin() { try { const p = JSON.parse(localStorage.getItem("forge.track")); return typeof p?.path === "string" ? p : null; } catch { return null; } } // an old plain-string value or garbage: ignored
+  // Start passes props.track. A key-opened pane (props {view:"track"}) resolves once from where the person was (this.here) and keeps that for its life (this.pinned).
+  // Nothing is stored: localStorage is shared by every copy opened with the same props (one store file per mod + props, seen live 2026-11-20), so a stored pin
+  // sent every key-opened pane to the first pane's track, and to "No repo" once that worktree was removed. ponytail: after an app restart the pane resolves again from where focus is.
   trackPath() {
     if (props()?.track) return props().track;
     if (this.pinned) return this.pinned;
-    this.pinned = this.savedPin()?.path ?? trackFor(this.data.worktrees, this.here?.cwd) ?? null; // the stored pin, else resolve once from where the pane opened
-    if (this.pinned) try { localStorage.setItem("forge.track", JSON.stringify({ path: this.pinned, on: this.on })); } catch {} // storage unavailable: the pin lives in this.pinned only
+    this.pinned = trackFor(this.data.worktrees, this.here?.cwd) ?? null;
     return this.pinned;
   }
   track() { const p = this.trackPath(); return p ? this.live().find((t) => t.path === p) ?? null : null; } // tracks() also holds PR-only Done items with path null: never match those

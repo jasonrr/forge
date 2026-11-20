@@ -63,3 +63,7 @@
 - A plan that embeds class-method code inside an indented markdown list → implementers paste it with the list's extra indent; strip the list indent from code blocks in plans, or tell the implementer to match the class's indent.
 - A Herdr key handler that runs an action on `enter` → gpui auto-repeat fires it again while held (`KeyEvent.is_held`); guard actions, let only movement keys repeat.
 - Replacing a clickable button with a spinner while a flag is set → any path that leaves the flag set (a click during a running refresh) leaves the UI with no way out; clear or honour the flag on every exit.
+
+## track-pane-shared-pin (2026-11-20)
+
+- A mod copy's `localStorage` is one store file per mod + props (`data/<mod>/store-<hash>.json`), not per pane, whatever Herdr's docs say → a value "remembered per pane" there is shared by every pane opened with the same props (every ⌘⇧J track pane read one pin, left behind by a test worktree in another session); verify "per copy" storage with two live copies before relying on it, and keep per-pane state in memory or in props.
