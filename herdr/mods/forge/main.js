@@ -237,7 +237,7 @@ export default class Forge extends View {
     cx.spawn(async (cx) => {
       this.homeIssues(cx); // from the snapshot's repos: the shown repo's backlog does not wait for discovery
       if (this.refreshing) return; this.refreshing = true;
-      const forced = this.force; // ponytail: a click during a running refresh is honoured by the next one (the 60 s timer), not at once
+      const forced = this.force; // a click during a running refresh is honoured by a forced run right after it (finally)
       try {
         const { repos, unreachable } = await this.discoverRepos(), slots = [], out = [];
         const noSpaces = !spaces().length; // the layout has not loaded yet (a restored Home tab at app start): a local repo known only through its space would vanish for one tick
@@ -275,7 +275,7 @@ export default class Forge extends View {
         cx.notify();
         this.warmIssues(out.filter((r) => !r.error)); // not awaited: the refresh is done, this trickles behind it
         if (spaces().length && !unreachable.size) this.prune(out); // only on a full picture: a loading layout or an unreachable machine hides repos that are still there
-      } finally { this.refreshing = false; if (forced) this.force = false; this.syncBadge(null, true); cx.notify(); }
+      } finally { this.refreshing = false; if (forced) this.force = false; this.syncBadge(null, true); cx.notify(); if (this.force) this.refreshHome(cx); } // a Refresh pressed during this run: honour it now, not at the next tick (the button is a spinner until then)
     });
   }
   // Home's last result in shared.json, so a new Home tab paints at once and refreshes behind it: the repo list here, each repo's data
@@ -418,6 +418,7 @@ export default class Forge extends View {
   homeKey(e, cx) {
     const order = this.order ?? [], i = Math.max(0, order.findIndex((r) => r.key === this.cur)), r = order[i];
     const move = (n) => { const to = order[Math.max(0, Math.min(order.length - 1, n))]; if (to) { this.cur = to.key; this.reveal = true; } };
+    if (e.is_held && !["j", "k", "up", "down"].includes(e.keystroke)) return true; // key repeat moves the selection, never re-runs an action or opens a second browser tab
     switch (e.keystroke) {
       case "j": case "down": move(i + 1); break;
       case "k": case "up": move(i - 1); break;
