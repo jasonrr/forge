@@ -81,3 +81,7 @@ Assign on Home always runs the agent in a Herdr space (decided 2026-11-20). Forg
 ## Open questions
 
 None.
+
+## Deviations
+
+- T1 commit 1ef1211 — deviation: none (review was a mechanical verbatim diff against cockpit's ui.js and icons, no reviewer subagent) — parked: none
