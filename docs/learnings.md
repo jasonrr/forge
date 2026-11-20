@@ -57,3 +57,7 @@
 - `git diff --name-only base...HEAD -- docs/plans` lists deleted and edited files, not just added ones → every "the branch's plan/design" lookup needs `--diff-filter=A`; this PR's own diff (adding one plan, deleting five) named six files and `git rm` failed atomically.
 - A routing rule that infers "the build already ran" from where changed files live (outside `docs/`) misfires both ways (a README edit, a docs-only build) → route on a recorded fact instead: the shelf's Stage and Done line.
 - Plan files once shipped skill text verbatim with unquoted `$(basename "$PWD")` paths → test any copy-paste shell block in a throwaway repo with a space in its name and a non-`main` default branch before shipping.
+
+## command-center (PR #47, 2026-11-20)
+
+- A plan that embeds class-method code inside an indented markdown list → implementers paste it with the list's extra indent; strip the list indent from code blocks in plans, or tell the implementer to match the class's indent.
