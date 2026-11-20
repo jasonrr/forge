@@ -61,3 +61,5 @@
 ## command-center (PR #47, 2026-11-20)
 
 - A plan that embeds class-method code inside an indented markdown list → implementers paste it with the list's extra indent; strip the list indent from code blocks in plans, or tell the implementer to match the class's indent.
+- A Herdr key handler that runs an action on `enter` → gpui auto-repeat fires it again while held (`KeyEvent.is_held`); guard actions, let only movement keys repeat.
+- Replacing a clickable button with a spinner while a flag is set → any path that leaves the flag set (a click during a running refresh) leaves the UI with no way out; clear or honour the flag on every exit.
