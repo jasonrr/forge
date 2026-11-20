@@ -4,7 +4,7 @@ import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSy
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { REPO_SCRIPT, parseRepo, slimIssue, repoFor, spaceFor } from "./model.js";
-import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, takenIssues, isParked, parkedFrom, lead, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS, slimPr, trackFor, HOME_GROUPS, homeGroups, drafts, cacheLife, newest, QUIET_CAP } from "./model.js";
+import { parseWorktrees, progress, linked, slugify, kind, planTasks, tracks, agentsOn, takenIssues, isParked, parkedFrom, lead, branchFor, shelfBranch, nextLabel, chip, DONE_WINDOW_MS, slimPr, trackFor, HOME_GROUPS, homeGroups, drafts, cacheLife, newest, QUIET_CAP, age, humanize, homeRow, backlogRow } from "./model.js";
 
 const WT = "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\nworktree /r/.claude/worktrees/ring\nHEAD bbb\nbranch refs/heads/feat/ring\n\nworktree /h/.herdr/worktrees/r/fix-login\nHEAD ccc\ndetached\n\nworktree /gone\nHEAD ddd\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n";
 
@@ -444,4 +444,52 @@ test("repoFor: checkout or linked worktree, deepest wins, machine must match", (
   assert.equal(repoFor(repos, "/c/other", null), repos[1]);
   assert.equal(repoFor(repos, "/c/forge", "m"), repos[2]);
   assert.equal(repoFor(repos, "/elsewhere", null), null); assert.equal(repoFor(repos, null, null), null);
+});
+
+test("age: m/h/d from unix seconds; unknown (0 or null) is null", () => {
+  const now = 1_000_000_000_000;
+  assert.equal(age(now / 1000 - 20, now), "now");
+  assert.equal(age(now / 1000 - 120, now), "2m");
+  assert.equal(age(now / 1000 - 7200, now), "2h");
+  assert.equal(age(now / 1000 - 3 * 86400, now), "3d");
+  assert.equal(age(0, now), null);
+  assert.equal(age(null, now), null);
+});
+
+test("humanize: a slug as a title", () => {
+  assert.equal(humanize("home-refresh"), "Home refresh");
+  assert.equal(humanize("yaml_desc--fix"), "Yaml desc fix");
+  assert.equal(humanize(""), "");
+  assert.equal(humanize(null), "");
+});
+
+test("homeRow: one title and one meta sentence per item, tone only from state", () => {
+  const now = 1_000_000_000_000, at = now / 1000 - 3600;
+  const base = { repo: "forge", root: "/r/forge", on: null, path: "/wt/a", branch: "feat/home-refresh", slug: "home-refresh", issues: [], at, ahead: 4, progress: { done: 0, total: 0 }, pr: null, merged: false };
+  assert.deepEqual(homeRow("needs", { ...base, agents: [{ status: "blocked" }], progress: { done: 3, total: 5 } }, now),
+    { key: "t::/wt/a", lane: "needs", dense: false, tone: "blocked", icon: "circle-help", ref: null, title: "Home refresh", meta: "forge · agent is waiting on you · 3 of 5 tasks", url: null });
+  const pr = { number: 27, title: "Fix YAML parsing", url: "https://x/pull/27", isDraft: false, state: "OPEN" };
+  assert.deepEqual(homeRow("needs", { ...base, agents: [], pr }, now),
+    { key: "t::/wt/a", lane: "needs", dense: false, tone: "blocked", icon: "git-pull-request", ref: null, title: "Fix YAML parsing", meta: "forge · PR #27 ready for review · 1h", url: "https://x/pull/27" });
+  assert.deepEqual(homeRow("flight", { ...base, on: "mini", agents: [{ status: "working" }], pr: { ...pr, isDraft: true }, progress: { done: 1, total: 4 } }, now),
+    { key: "t:mini:/wt/a", lane: "flight", dense: false, tone: "working", icon: "loader", ref: null, title: "Fix YAML parsing", meta: "forge @ mini · agent working · 1 of 4 tasks · draft PR #27", url: "https://x/pull/27" });
+  assert.deepEqual(homeRow("flight", { ...base, agents: [] }, now),
+    { key: "t::/wt/a", lane: "flight", dense: false, tone: "idle", icon: "circle", ref: null, title: "Home refresh", meta: "forge · no agent · 4 commits ahead · 1h", url: null });
+  assert.equal(homeRow("flight", { ...base, agents: [{ status: "idle" }], ahead: null, at: 0 }, now).meta, "forge · agent idle"); // unknown ahead and age: the segments drop
+  assert.equal(homeRow("flight", { ...base, agents: [], ahead: 1 }, now).meta, "forge · no agent · 1 commit ahead · 1h");
+  assert.deepEqual(homeRow("flight", { draft: true, path: null, slug: "command-center", design: "docs/decisions/x.md", plan: null, repo: "forge", root: "/r/forge", on: null, agents: [], issues: [], at: 0 }, now),
+    { key: "draft::/r/forge:command-center", lane: "flight", dense: false, tone: "idle", icon: "circle-dashed", ref: null, title: "Command center", meta: "forge · draft on main · design written", url: null });
+  assert.equal(homeRow("flight", { draft: true, path: null, slug: "x", design: "d.md", plan: "p.md", repo: "forge", root: "/r/forge", on: null, agents: [], issues: [], at: 0 }, now).meta, "forge · draft on main · plan written");
+  const issue = { number: 31, title: "Board follows focus", url: "https://x/issues/31", repository: { nameWithOwner: "me/forge", name: "forge" } };
+  assert.deepEqual(homeRow("planned", { issue, shelved: true, repo: "forge", root: "/r/forge", on: null, at: now / 1000 - 2 * 86400 }, now),
+    { key: "planned:me/forge#31", lane: "planned", dense: true, tone: "idle", icon: "circle-dashed", ref: "#31", title: "Board follows focus", meta: "forge · shelved · 2d", url: "https://x/issues/31" });
+  assert.deepEqual(homeRow("done", { ...base, path: null, branch: null, agents: [], pr: { ...pr, state: "MERGED" }, merged: true, at: now / 1000 - 86400 }, now),
+    { key: "t::https://x/pull/27", lane: "done", dense: true, tone: "done", icon: "circle-check", ref: "#27", title: "Fix YAML parsing", meta: "forge · merged 1d", url: "https://x/pull/27" });
+});
+
+test("backlogRow: an open issue as a dense row", () => {
+  const now = 1_000_000_000_000;
+  assert.deepEqual(backlogRow({ number: 9, title: "Login 500s", url: "https://x/issues/9", labels: [{ name: "bug" }], createdAt: new Date(now - 5 * 86400000).toISOString() }, now),
+    { key: "backlog:#9", lane: "backlog", dense: true, tone: "idle", icon: "circle-dashed", ref: "#9", title: "Login 500s", meta: "bug · 5d", url: "https://x/issues/9" });
+  assert.equal(backlogRow({ number: 9, title: "t", url: "u", labels: [], createdAt: "nonsense" }, now).meta, "");
 });

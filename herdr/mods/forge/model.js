@@ -173,7 +173,7 @@ export function trackFor(worktrees, cwd) {
   return hits[0]?.path ?? null;
 }
 
-export const HOME_GROUPS = [["needs", "Waiting on you"], ["flight", "In flight"], ["planned", "Planned"], ["done", "Done"]];
+export const HOME_GROUPS = [["needs", "Needs you"], ["flight", "In progress"], ["planned", "Up next"], ["done", "Done this week"]];
 // New, uncommitted design/plan files in a checkout (`git status --porcelain --untracked-files=all -- docs/decisions docs/plans`):
 // the work brainstorm/plan are writing before a worktree exists. Only new files (?? or A); an edit to a committed doc is not a draft.
 export function drafts(porcelain) {
@@ -223,6 +223,44 @@ export function homeGroups({ repos = [], assigned = [], shelved = [], merged = [
   items.planned.sort((a, b) => (b.shelved - a.shelved) || b.at - a.at); // shelved first, then newest
   items.done.sort((a, b) => b.at - a.at);
   return HOME_GROUPS.map(([key, title]) => ({ key, title, items: items[key] }));
+}
+
+// --- Home rows: what a row says, as data (main.js draws it and attaches the action) ---
+// Unix seconds → "now" / "12m" / "3h" / "2d". Unknown (0, null, NaN) is null: the caller drops the segment, never prints 0.
+export function age(sec, now = Date.now()) {
+  if (!sec || !Number.isFinite(sec)) return null;
+  const d = Math.max(0, now / 1000 - sec);
+  return d < 60 ? "now" : d < 3600 ? `${Math.floor(d / 60)}m` : d < 86400 ? `${Math.floor(d / 3600)}h` : `${Math.floor(d / 86400)}d`;
+}
+// "home-refresh" → "Home refresh": the only title a track without a PR has.
+export function humanize(slug) {
+  const s = (slug ?? "").replace(/[-_]+/g, " ").trim();
+  return s ? s[0].toUpperCase() + s.slice(1) : "";
+}
+// One homeGroups item as a row. tone: blocked | working | idle | done (the glyph's color — the only color on a row).
+// dense: a one-line row (Up next, Done); otherwise title over one meta sentence. ref: the mono identifier of a dense row.
+// key: a track's is its machine + worktree (or PR url), never its lane, so Home's selection stays on a track that changes lane.
+export function homeRow(lane, it, now = Date.now()) {
+  const meta = (...parts) => [it.on ? `${it.repo} @ ${it.on}` : it.repo, ...parts].filter(Boolean).join(" · ");
+  if (lane === "planned") {
+    const i = it.issue;
+    return { key: `planned:${i.repository?.nameWithOwner ?? it.repo}#${i.number}`, lane, dense: true, tone: "idle", icon: "circle-dashed", ref: `#${i.number}`, title: i.title, meta: meta(it.shelved ? "shelved" : null, age(it.at, now)), url: i.url ?? null };
+  }
+  if (it.draft) return { key: `draft:${it.on ?? ""}:${it.root}:${it.slug}`, lane, dense: false, tone: "idle", icon: "circle-dashed", ref: null, title: humanize(it.slug), meta: meta("draft on main", it.plan ? "plan written" : it.design ? "design written" : null), url: null };
+  const key = `t:${it.on ?? ""}:${it.path ?? it.pr?.url}`, title = it.pr?.title ?? humanize(it.slug), url = it.pr?.url ?? null;
+  if (lane === "done") return { key, lane, dense: true, tone: "done", icon: "circle-check", ref: it.pr ? `#${it.pr.number}` : null, title, meta: meta(["merged", age(it.at, now)].filter(Boolean).join(" ")), url };
+  const a = lead(it), tasks = it.progress?.total ? `${it.progress.done} of ${it.progress.total} tasks` : null;
+  const pr = it.pr ? `${it.pr.isDraft ? "draft " : ""}PR #${it.pr.number}` : null;
+  const row = (tone, icon, ...parts) => ({ key, lane, dense: false, tone, icon, ref: null, title, meta: meta(...parts), url });
+  if (a?.status === "blocked") return row("blocked", "circle-help", "agent is waiting on you", tasks);
+  if (lane === "needs" && it.pr) return row("blocked", "git-pull-request", `PR #${it.pr.number} ready for review`, age(it.at, now));
+  if (a?.status === "working") return row("working", "loader", "agent working", tasks, pr);
+  return row("idle", "circle", a ? `agent ${a.status}` : "no agent", it.ahead ? `${it.ahead} commit${it.ahead === 1 ? "" : "s"} ahead` : null, pr, age(it.at, now));
+}
+// An open issue of the shown repo's backlog as a dense row.
+export function backlogRow(i, now = Date.now()) {
+  const k = kind(i) ?? (isParked(i) ? "agent" : null);
+  return { key: `backlog:#${i.number}`, lane: "backlog", dense: true, tone: "idle", icon: "circle-dashed", ref: `#${i.number}`, title: i.title, meta: [k, age(Date.parse(i.createdAt) / 1000, now)].filter(Boolean).join(" · "), url: i.url ?? null };
 }
 
 // How long a gh cache entry counts as fresh: its base ttl, stretched to 1/20 of how long its data has gone unchanged, up to QUIET_CAP.
