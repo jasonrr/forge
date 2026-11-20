@@ -54,6 +54,8 @@ export default class Forge extends View {
     if (r === "moved") return; // an old docked copy: no git or gh work
     if (r === "home") { // Home spans every repo: no this.root, no this.here
       this.cur = null; this.order = []; this.doneOpen = false; this.scroll = ScrollHandle.new(); // Home's selection (a row key), the rows in screen order, the Done fold, the list's scroll
+      this.keys = cx.focus_handle(); this.reveal = false;
+      cx.spawn(async (cx) => { await cx.sleep(100); try { this.keys.focus(); } catch {} }); // Home takes the keyboard once its first render has attached the handle (track_focus); if that fails, the first click does (root on_mouse_down)
       this.seedHome();
       this.refreshHome(cx);
       cx.timer.every(GH_TTL, (cx) => { if (!this.refreshing) this.refreshHome(cx); });
@@ -413,7 +415,24 @@ export default class Forge extends View {
   empty(t, text) { return div().px(8).py(4).text_size(12).text_color(t.dim).child(text); }
 
      // Home as lanes of rows (model.js homeRow / backlogRow), each with its one action. order: the rows top to bottom, as j/k walk them.
-     homeView() {
+     // Home's keys (e.keystroke: gpui's chord spelling). true: handled, the caller stops propagation.
+  homeKey(e, cx) {
+    const order = this.order ?? [], i = Math.max(0, order.findIndex((r) => r.key === this.cur)), r = order[i];
+    const move = (n) => { const to = order[Math.max(0, Math.min(order.length - 1, n))]; if (to) { this.cur = to.key; this.reveal = true; } };
+    switch (e.keystroke) {
+      case "j": case "down": move(i + 1); break;
+      case "k": case "up": move(i - 1); break;
+      case "home": move(0); break;
+      case "end": move(order.length - 1); break;
+      case "enter": if (r?.act && r.lane !== "done") r.act.go(cx); break; // never "Remove worktree" from the keyboard
+      case "o": if (r?.url) this.openGitHub(r.url); break;
+      case "r": if (!this.force) { this.force = true; this.refreshHome(cx); } break;
+      default: return false;
+    }
+    cx.notify(); return true;
+  }
+
+  homeView() {
        const groups = this.homeModel(), now = Date.now(), here = this.hereRepo(), BACKLOG_ROWS = 8;
        const act = (g, it) => {
          if (g.key === "planned") return it.root ? { label: it.shelved ? "Resume" : "Start", go: () => this.openStart(it.issue.number, it.root, it.on) } : null;
@@ -448,7 +467,7 @@ export default class Forge extends View {
        const rowEl = (r) => {
          const on = r.key === this.cur;
          const actions = h_flex().id(`x-${r.key}`).flex_none().gap(4).items_center().on_mouse_down("left", (_e, cx) => cx.stop_propagation()) // a press on a button is not a press on the row (the same guard as button(), main.js)
-           .when(r.act, (e) => e.child(Button(`a-${r.key}`, { label: r.act.label, size: "sm", variant: on ? "default" : "ghost", onClick: (_e, cx) => { cx.stop_propagation(); r.act.go(cx); } })))
+           .when(r.act, (e) => e.child(Button(`a-${r.key}`, { label: r.act.label, size: "sm", variant: on ? "default" : "ghost", kbd: on && r.lane !== "done" ? "⏎" : undefined, onClick: (_e, cx) => { cx.stop_propagation(); r.act.go(cx); } })))
            .when(r.url, (e) => e.child(Button(`o-${r.key}`, { icon: "external", size: "icon-sm", variant: "ghost", tooltip: "Open on GitHub", onClick: (_e, cx) => { cx.stop_propagation(); this.openGitHub(r.url); } })));
          const el = h_flex().id(`r-${r.key}`).px(8).gap(10).min_w(0).flex_none().items_center().rounded(RADIUS.md).cursor_pointer()
            .bg(on ? k.selected : NONE).hover((s) => s.bg(on ? k.selected : k.accent))
@@ -480,11 +499,13 @@ export default class Forge extends View {
          if (!folded) for (const r of l.rows) { at[r.key] = kids.length; kids.push(rowEl(r)); }
          if (l.key === "backlog" && l.count > l.rows.length) kids.push(note(`${l.count - l.rows.length} more in the backlog`));
        }
+       if (this.reveal) { this.reveal = false; if (at[this.cur] != null) this.scroll.scroll_to_item(at[this.cur]); } // only after a key moved the selection: a wheel scroll is never undone
        if (this.repos.length) kids.push(h_flex().mt(10).px(8).gap(4).items_center().flex_wrap().flex_none().text_size(TEXT.sm).text_color(k.mutedFg)
          .child(div().mr(4).child("Backlogs"))
          .children(this.repos.map((r) => Button(`h-bk-${r.on ?? ""}-${r.root}`, { label: label(r), size: "sm", variant: "ghost", onClick: () => openBacklog(r) }))));
        const first = !this.loaded && !this.repos.length; // no snapshot yet: the very first open
        return v_flex().id("root").size_full().bg(k.canvas).text_size(TEXT.base).text_color(k.foreground).on_size_change(this.onSize)
+         .track_focus(this.keys).on_mouse_down("left", () => this.keys.focus()).on_key_down((e, cx) => { if (this.homeKey(e, cx)) cx.stop_propagation(); })
          .child(h_flex().px(20).py(10).gap(10).items_center().flex_none().border_b(1).border_color(k.border)
            .child(div().flex_none().font_semibold().text_size(TEXT.lg).child("Forge"))
            .child(div().flex_1().min_w(0))
@@ -495,7 +516,8 @@ export default class Forge extends View {
              : Button("refresh", { icon: "refresh-cw", size: "icon-sm", variant: "ghost", tooltip: "Refresh", onClick: (_e, cx) => { this.force = true; cx.notify(); this.refreshHome(cx); } }))
            .child(Button("start", { label: "Start work", icon: "plus", size: "sm", onClick: () => this.openStart(null, null, null) })))
          .when(first, (el) => el.child(v_flex().px(20).py(16).gap(10).child(Skeleton({ h: 14, w: 120 })).child(Skeleton({ h: 30 })).child(Skeleton({ h: 30 })).child(Skeleton({ h: 30 }))))
-         .when(!first, (el) => el.child(v_flex().id("home-body").flex_1().min_h(0).overflow_y_scroll().track_scroll(this.scroll).px(12).pb(12).gap(2).children(kids)));
+         .when(!first, (el) => el.child(v_flex().id("home-body").flex_1().min_h(0).overflow_y_scroll().track_scroll(this.scroll).px(12).pb(12).gap(2).children(kids)))
+         .when(!first && !this.narrow(560), (el) => el.child(KeyHints([["j", "down"], ["k", "up"], ["⏎", "run the row's action"], ["o", "open on GitHub"], ["r", "refresh"]])));
      }
    
   renderBacklog(cx) {
