@@ -432,7 +432,7 @@ export default class Forge extends View {
          const p = lanes.findIndex((l) => l.key === "planned");
          lanes.splice(p < 0 ? lanes.length : p + 1, 0, lane);
        }
-       const errs = [this.homeErr, this.hereErr, ...this.repos.filter((r) => r.error).map((r) => { const n = r.root.split("/").pop(); return `${r.on ? `${n} @ ${r.on}` : n}: ${r.error}`; })].filter(Boolean); // every source that failed, for the one header indicator
+       const errs = [this.homeErr, here ? this.hereErr : null, ...this.repos.filter((r) => r.error).map((r) => { const n = r.root.split("/").pop(); return `${r.on ? `${n} @ ${r.on}` : n}: ${r.error}`; })].filter(Boolean); // every source that failed, for the one header indicator (hereErr only while its backlog is shown: a stale one would also freeze the badge)
        const shown = lanes.filter((l) => l.key === "needs" || l.key === "backlog" || l.rows.length || errs.length); // an empty lane is not drawn, unless a source failed: then empty may only mean "could not load", and the lane says so
        return { lanes: shown, errs, order: shown.flatMap((l) => (l.key === "done" && !this.doneOpen ? [] : l.rows)) };
      }
