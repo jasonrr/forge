@@ -86,3 +86,4 @@ None.
 
 - T1 commit 1ef1211 — deviation: none (review was a mechanical verbatim diff against cockpit's ui.js and icons, no reviewer subagent) — parked: none
 - T2 commit ab47d23 — deviation: none (review p3, not fixed: a merged track's row key changes from worktree path to PR url when its worktree is removed, so the selection falls back to the first row — acceptable after a deliberate removal) — parked: none
+- T3 commit f9d7209 + c3eb950 — deviation: review fix c3eb950: hereErr counts in Home's errors only while its backlog is shown (a stale one showed a permanent warning and would freeze T5's badge). Not fixed (p3): an empty lane reads 'A source failed' when any unrelated source failed — cautious, not wrong state — parked: none
