@@ -2,10 +2,11 @@
 // Home {view:"home"}; track pane {view:"track"} or {track}; backlog {view:"backlog"}; Start ({view:"start"} or the mod.open overlay); and the "moved" notice for an old docked block. Stored state: only the track pin (localStorage) and the shared gh cache (shared()); everything else is derived
 // from git worktrees, the docs on each branch, gh PRs/issues and the host's agents.
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
+import { v_flex, h_flex, ScrollHandle, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
 import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, setShared, shared } from "herdr";
 import { writeFile, mkdir, readdir, readFile } from "fs/promises"; // allowed: writes under ~/.config/herdr-app, reads under home (AGENTS.md "Other built-ins")
-import { nextLabel, chip, lead, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, parkedFrom, branchFor, shelfBranch, slimPr, trackFor, homeGroups, drafts, DONE_WINDOW_MS, cacheLife, newest, REPO_SCRIPT, parseRepo, slimIssue, repoFor, spaceFor } from "./model.js";
+import { nextLabel, chip, lead, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, parkedFrom, branchFor, shelfBranch, slimPr, trackFor, homeGroups, drafts, DONE_WINDOW_MS, cacheLife, newest, REPO_SCRIPT, parseRepo, slimIssue, repoFor, spaceFor, homeRow, backlogRow } from "./model.js";
+import { RADIUS, TEXT, tokens, Icon, Spinner, Button, Skeleton, SectionHeader, KeyHints, Mono } from "./ui.js";
 
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const PR_FIELDS = "number,title,body,url,isDraft,state,headRefName,mergedAt,updatedAt,author";
@@ -52,6 +53,7 @@ export default class Forge extends View {
     const r = this.route();
     if (r === "moved") return; // an old docked copy: no git or gh work
     if (r === "home") { // Home spans every repo: no this.root, no this.here
+      this.cur = null; this.order = []; this.doneOpen = false; this.scroll = ScrollHandle.new(); // Home's selection (a row key), the rows in screen order, the Done fold, the list's scroll
       this.seedHome();
       this.refreshHome(cx);
       cx.timer.every(GH_TTL, (cx) => { if (!this.refreshing) this.refreshHome(cx); });
@@ -262,7 +264,7 @@ export default class Forge extends View {
         ]);
         this.repos = out;
         this.found = { assigned: assigned ?? this.found.assigned, shelved: shelved ?? this.found.shelved, merged: merged ?? this.found.merged };
-        this.homeErr = [assigned, shelved, merged].includes(null) ? "gh search unavailable — Planned/Done may be stale" : null;
+        this.homeErr = [assigned, shelved, merged].includes(null) ? "gh search unavailable — Up next/Done may be stale" : null;
         const meBy = {};
         for (const { root, on } of out) if (!((on ?? "") in meBy)) meBy[on ?? ""] = (await this.cachedGh(`me:${on ?? ""}`, ["api", "user"], root, on, DAY, (u) => u.login)) ?? this.meBy[on ?? ""]; // one lookup per machine, sequential
         this.meBy = meBy; this.loaded = true;
@@ -410,85 +412,92 @@ export default class Forge extends View {
   }
   empty(t, text) { return div().px(8).py(4).text_size(12).text_color(t.dim).child(text); }
 
-  renderHome(cx) {
-    const t = theme(), groups = this.homeModel(), label = (name, on) => (on ? `${name} @ ${on}` : name);
-    const repoCell = (it) => MONO(div()).w(120).flex_none().min_w(0).truncate().text_size(11).text_color(t.muted).child(label(it.repo, it.on));
-    const muted = (text) => MONO(div()).flex_none().text_size(11).text_color(t.muted).child(text);
-    const row = (id) => h_flex().id(id).px(8).py(5).gap(10).items_center().min_w(0).rounded(6).hover((e) => e.bg(t.hover));
-    const focusSpace = (it) => () => { // a row jumps to its worktree's space, opening one if it has none
-      const sp = this.spaceAt(it.path, it.on);
-      if (sp) run("space.select", { id: sp.id }); else run("space.new", { folder: it.path, machine: it.on ?? "" });
-    };
-    const item = (g, it) => {
-      const color = this.groupColor(t, g.key);
-      if (g.key === "planned") {
-        const key = `${it.issue.repository.nameWithOwner}-${it.issue.number}`;
-        return row(`h-p-${key}`)
-          .child(repoCell(it))
-          .child(muted(`#${it.issue.number}`))
-          .child(div().flex_1().min_w(0).truncate().child(it.issue.title))
-          .child(muted(it.shelved ? "shelved" : "assigned"))
-          .child(muted(ago(it.at)))
-          .when(it.root, (e) => e.child(this.button(t, `h-ps-${key}`, it.shelved ? "Resume" : "Start", () => this.openStart(it.issue.number, it.root, it.on), true)))
-          .child(this.link(t, `h-pl-${key}`, "", it.issue.url));
-      }
-      if (it.draft) {
-        const key = `${it.on ?? ""}-${it.root}-${it.slug}`, ds = this.draftStart(it, it.root, it.on);
-        return row(`h-d-${key}`)
-          .child(repoCell(it))
-          .child(div().flex_1().min_w(0).truncate().child(it.slug))
-          .child(muted(`${it.design ? "design ✓" : "design –"} · ${it.plan ? "plan ✓" : "plan –"}`))
-          .child(muted("on main"))
-          .child(this.button(t, `h-dd-${key}`, ds.label, ds.go, true));
-      }
-      const key = `${g.key}-${it.on ?? ""}-${it.path ?? it.pr.url}`, nx = it.path ? this.next(it, { root: it.root, on: it.on }) : null;
-      return row(`h-${key}`).when(it.path, (e) => e.cursor_pointer().on_click(focusSpace(it)))
-        .child(repoCell(it))
-        .when(g.key === "done", (e) => e
-          .child(muted(`#${it.pr.number}`))
-          .child(div().flex_1().min_w(0).truncate().child(it.pr.title))
-          .child(muted(`merged ${ago(it.at)}`))
-          .child(this.link(t, `h-dl-${key}`, "", it.pr.url)))
-        .when(g.key !== "done", (e) => e
-          .child(MONO(div()).flex_1().min_w(0).truncate().child(it.branch))
-          .child(it.agents.length
-            ? div().px(6).py(1).rounded(9).flex_none().text_size(10.5).bg(alpha(color, "22")).text_color(color).child(g.key === "needs" && !it.agents.some((a) => a.status === "blocked") ? "review PR" : chip(it))
-            : muted(["○ no agent", it.ahead == null ? null : `${it.ahead} ahead`, ago(it.at)].filter(Boolean).join(" · "))) // ahead null: unknown, say nothing (#19)
-          .when(it.progress?.total, (e) => e.child(muted(`${it.progress.done}/${it.progress.total}`)))
-          .when(it.pr, (e) => e.child(this.link(t, `h-pr-${key}`, `PR #${it.pr.number}`, it.pr.url))))
-        .when(nx, (e) => e.child(this.button(t, `h-nx-${key}`, nx.label, nx.go, g.key !== "done")));
-    };
-    // The shown repo's backlog, always on Home: painted from the shared issue copy (homeIssues refreshes it), minus what is already a track or listed under Planned.
-    const openBacklog = (r) => run("tab.new", { name: "Backlog", mod: "forge", props: { view: "backlog", root: r.root, on: r.on } });
-    const here = this.hereRepo(), cached = here ? shared(issuesKey(here.on, here.root))?.data : null, BACKLOG_ROWS = 8;
-    const skip = new Set(here ? groups.flatMap((g) => g.items).filter((it) => it.root === here.root && (it.on ?? null) === here.on).flatMap((it) => (it.issue ? [it.issue.number] : it.merged ? [] : it.issues ?? [])) : []);
-    const open = (cached ?? []).filter((i) => !skip.has(i.number) && !(i.labels ?? []).some((l) => l.name === "shelved"));
-    const backlog = here && v_flex().gap(2)
-      .child(h_flex().px(8).pb(4).gap(8).items_center()
-        .child(div().text_size(11).font_semibold().text_color(t.muted).child(`BACKLOG · ${label(here.root.split("/").pop(), here.on).toUpperCase()}${cached ? ` · ${open.length}` : ""}`))
-        .child(this.button(t, "h-bo", "Open backlog", () => openBacklog(here))))
-      .children(!cached ? [this.empty(t, this.hereErr ?? "loading…")] : open.length ? open.slice(0, BACKLOG_ROWS).map((i) => row(`h-b-${i.number}`)
-        .child(MONO(div()).w(120).flex_none().min_w(0).truncate().text_size(11).text_color(t.muted).child(kind(i) ?? (isParked(i) ? "agent" : "")))
-        .child(muted(`#${i.number}`))
-        .child(div().flex_1().min_w(0).truncate().child(i.title))
-        .child(muted(since(i.createdAt)))
-        .child(this.button(t, `h-bs-${i.number}`, "Start", () => this.openStart(i.number, here.root, here.on)))
-        .child(this.link(t, `h-bl-${i.number}`, "", i.url))) : [this.empty(t, "no open issues")])
-      .when(open.length > BACKLOG_ROWS, (e) => e.child(this.empty(t, `+ ${open.length - BACKLOG_ROWS} more in the backlog`)));
-    return v_flex().id("root").size_full().bg(t.canvas).text_size(13).text_color(t.foreground).on_size_change(this.onSize)
-      .child(this.header(t, "Home", [this.button(t, "refresh", this.force ? "Refreshing…" : "Refresh", (cx) => { this.force = true; cx.notify(); this.refreshHome(cx); }), this.button(t, "start", "+ Start work", () => this.openStart(null, null, null), true)], "all repos"))
-      .when(this.homeErr, (el) => el.child(this.empty(t, this.homeErr)))
-      .children(this.repos.filter((r) => r.error).map((r) => this.empty(t, `${label(r.root.split("/").pop(), r.on)}: ${r.error}`)))
-      .when(!this.loaded && !this.repos.length, (el) => el.child(this.empty(t, "loading…")))
-      .when(this.loaded || this.repos.length, (el) => el.child(v_flex().id("home-body").flex_1().min_h(0).overflow_y_scroll().px(12).py(10).gap(16).children(groups.filter((g) => this.loaded || g.key !== "done").flatMap((g) => [ // Done needs this.meBy: hidden until the first load ends
-        v_flex().gap(2)
-          .child(h_flex().px(8).pb(4).gap(6).items_center()
-            .child(div().text_size(11).font_semibold().text_color(this.groupColor(t, g.key)).child(`${g.title.toUpperCase()} · ${g.items.length}`)))
-          .children(g.items.length ? g.items.map((it) => item(g, it)) : [this.empty(t, "nothing")])
-          .when(g.key === "planned", (el) => el.child(h_flex().px(8).py(4).gap(8).items_center().flex_wrap().text_size(11.5).text_color(t.muted)
-            .child(div().child("Backlogs:"))
-            .children(this.repos.map((r) => this.button(t, `h-bk-${r.on ?? ""}-${r.root}`, label(r.root.split("/").pop(), r.on), () => openBacklog(r)))))), ...(g.key === "planned" && backlog ? [backlog] : [])]))));
-  }
+     // Home as lanes of rows (model.js homeRow / backlogRow), each with its one action. order: the rows top to bottom, as j/k walk them.
+     homeView() {
+       const groups = this.homeModel(), now = Date.now(), here = this.hereRepo(), BACKLOG_ROWS = 8;
+       const act = (g, it) => {
+         if (g.key === "planned") return it.root ? { label: it.shelved ? "Resume" : "Start", go: () => this.openStart(it.issue.number, it.root, it.on) } : null;
+         if (it.draft) return this.draftStart(it, it.root, it.on);
+         return it.path ? this.next(it, { root: it.root, on: it.on }) : null;
+       };
+       const jump = (it) => () => { const sp = this.spaceAt(it.path, it.on); if (sp) run("space.select", { id: sp.id }); else run("space.new", { folder: it.path, machine: it.on ?? "" }); }; // a track row jumps to its worktree's space, opening one if it has none
+       const lanes = groups.filter((g) => this.loaded || g.key !== "done") // Done needs this.meBy: hidden until the first load ends
+         .map((g) => ({ key: g.key, title: g.title, count: g.items.length, rows: g.items.map((it) => ({ ...homeRow(g.key, it, now), act: act(g, it), jump: it.path ? jump(it) : null })) }));
+       if (here) { // the shown repo's backlog, minus what is already a track or listed under Up next
+         const cached = shared(issuesKey(here.on, here.root))?.data;
+         const skip = new Set(groups.flatMap((g) => g.items).filter((it) => it.root === here.root && (it.on ?? null) === here.on).flatMap((it) => (it.issue ? [it.issue.number] : it.merged ? [] : it.issues ?? [])));
+         const open = (cached ?? []).filter((i) => !skip.has(i.number) && !(i.labels ?? []).some((l) => l.name === "shelved"));
+         const name = here.root.split("/").pop(), lane = { key: "backlog", title: `Backlog · ${here.on ? `${name} @ ${here.on}` : name}`, here, loading: !cached, count: open.length,
+           rows: open.slice(0, BACKLOG_ROWS).map((i) => ({ ...backlogRow(i, now), act: { label: "Start", go: () => this.openStart(i.number, here.root, here.on) }, jump: null })) };
+         const p = lanes.findIndex((l) => l.key === "planned");
+         lanes.splice(p < 0 ? lanes.length : p + 1, 0, lane);
+       }
+       const errs = [this.homeErr, this.hereErr, ...this.repos.filter((r) => r.error).map((r) => { const n = r.root.split("/").pop(); return `${r.on ? `${n} @ ${r.on}` : n}: ${r.error}`; })].filter(Boolean); // every source that failed, for the one header indicator
+       const shown = lanes.filter((l) => l.key === "needs" || l.key === "backlog" || l.rows.length || errs.length); // an empty lane is not drawn, unless a source failed: then empty may only mean "could not load", and the lane says so
+       return { lanes: shown, errs, order: shown.flatMap((l) => (l.key === "done" && !this.doneOpen ? [] : l.rows)) };
+     }
+   
+
+     renderHome(cx) {
+       const k = tokens(), { lanes, order, errs } = this.homeView();
+       this.order = order;
+       if (!order.some((r) => r.key === this.cur)) this.cur = order[0]?.key ?? null; // the selection follows the data: a row that left hands over to the first
+       const label = (r) => { const n = r.root.split("/").pop(); return r.on ? `${n} @ ${r.on}` : n; };
+       const note = (text) => div().px(8).py(4).text_size(TEXT.sm).text_color(k.dim).child(text);
+       const glyph = (r) => (r.tone === "working" ? Spinner({ size: 14, color: k.working }) : Icon(r.icon, { size: 14, color: { blocked: k.blocked, done: k.success }[r.tone] ?? k.dim }));
+       const rowEl = (r) => {
+         const on = r.key === this.cur;
+         const actions = h_flex().id(`x-${r.key}`).flex_none().gap(4).items_center().on_mouse_down("left", (_e, cx) => cx.stop_propagation()) // a press on a button is not a press on the row (the same guard as button(), main.js)
+           .when(r.act, (e) => e.child(Button(`a-${r.key}`, { label: r.act.label, size: "sm", variant: on ? "default" : "ghost", onClick: (_e, cx) => { cx.stop_propagation(); r.act.go(cx); } })))
+           .when(r.url, (e) => e.child(Button(`o-${r.key}`, { icon: "external", size: "icon-sm", variant: "ghost", tooltip: "Open on GitHub", onClick: (_e, cx) => { cx.stop_propagation(); this.openGitHub(r.url); } })));
+         const el = h_flex().id(`r-${r.key}`).px(8).gap(10).min_w(0).flex_none().items_center().rounded(RADIUS.md).cursor_pointer()
+           .bg(on ? k.selected : NONE).hover((s) => s.bg(on ? k.selected : k.accent))
+           .on_click((_e, cx) => { this.cur = r.key; cx.notify(); if (r.jump) r.jump(); });
+         return r.dense
+           ? el.h(30)
+             .child(div().w(48).flex_none().child(Mono(r.ref ?? "")))
+             .child(div().flex_1().min_w(0).truncate().child(r.title))
+             .when(!this.narrow(520), (e) => e.child(div().flex_none().max_w(240).truncate().text_size(TEXT.xs).text_color(k.mutedFg).child(r.meta)))
+             .child(actions)
+           : el.py(7)
+             .child(glyph(r))
+             .child(v_flex().flex_1().min_w(0).gap(1)
+               .child(div().truncate().font_medium().child(r.title))
+               .child(div().truncate().text_size(TEXT.xs).text_color(k.mutedFg).child(r.meta)))
+             .child(actions);
+       };
+       const openBacklog = (r) => run("tab.new", { name: "Backlog", mod: "forge", props: { view: "backlog", root: r.root, on: r.on } });
+       const kids = [], at = {}; // the scroll area's direct children, and each row's index among them (scroll_to_item counts direct children)
+       for (const l of lanes) {
+         const folded = l.key === "done" && !this.doneOpen;
+         const title = div().min_w(0).truncate().child(l.title); // an element, so a long "Backlog · repo @ machine" truncates instead of wrapping (SectionHeader's own text cannot shrink)
+         if (l.key === "done") kids.push(SectionHeader(title, { count: l.count, id: "lane-done", action: Icon(folded ? "chevron-right" : "chevron-down", { size: 14, color: k.dim }) }).mt(10).min_w(0).flex_none().cursor_pointer().on_click((_e, cx) => { this.doneOpen = !this.doneOpen; cx.notify(); }));
+         else kids.push(SectionHeader(title, { count: l.key === "backlog" && l.loading ? undefined : l.count, action: l.key === "backlog" ? Button("h-bo", { label: "Open backlog", size: "sm", variant: "ghost", onClick: () => openBacklog(l.here) }) : undefined }).mt(10).min_w(0).flex_none());
+         if (l.key === "needs" && !l.rows.length) kids.push(note(!this.loaded ? "Loading…" : errs.length ? `Can't tell: ${errs[0]}` : "All clear. Nothing is waiting on you.")); // a failed fetch is never "all clear"
+         if (l.key !== "needs" && l.key !== "backlog" && !l.rows.length) kids.push(note("Nothing loaded. A source failed, see the warning above.")); // only drawn when errs is non-empty (homeView)
+         if (l.key === "backlog" && l.loading) kids.push(this.hereErr ? note(this.hereErr) : v_flex().px(8).py(4).gap(8).child(Skeleton({ h: 14 })).child(Skeleton({ h: 14, w: 320 })));
+         if (l.key === "backlog" && !l.loading && !l.rows.length) kids.push(note("No open issues."));
+         if (!folded) for (const r of l.rows) { at[r.key] = kids.length; kids.push(rowEl(r)); }
+         if (l.key === "backlog" && l.count > l.rows.length) kids.push(note(`${l.count - l.rows.length} more in the backlog`));
+       }
+       if (this.repos.length) kids.push(h_flex().mt(10).px(8).gap(4).items_center().flex_wrap().flex_none().text_size(TEXT.sm).text_color(k.mutedFg)
+         .child(div().mr(4).child("Backlogs"))
+         .children(this.repos.map((r) => Button(`h-bk-${r.on ?? ""}-${r.root}`, { label: label(r), size: "sm", variant: "ghost", onClick: () => openBacklog(r) }))));
+       const first = !this.loaded && !this.repos.length; // no snapshot yet: the very first open
+       return v_flex().id("root").size_full().bg(k.canvas).text_size(TEXT.base).text_color(k.foreground).on_size_change(this.onSize)
+         .child(h_flex().px(20).py(10).gap(10).items_center().flex_none().border_b(1).border_color(k.border)
+           .child(div().flex_none().font_semibold().text_size(TEXT.lg).child("Forge"))
+           .child(div().flex_1().min_w(0))
+           .when(errs.length, (e) => e.child(h_flex().id("health").min_w(0).flex_shrink(1).gap(6).items_center().text_size(TEXT.xs).text_color(k.warning).tooltip(errs.join(" · "))
+             .child(Icon("triangle-alert", { size: 14, color: k.warning }))
+             .child(div().truncate().min_w(0).child(errs.length === 1 ? errs[0] : `${errs.length} sources are stale`))))
+           .child(this.force ? h_flex().w(28).h(28).flex_none().items_center().justify_center().child(Spinner({ size: 14, color: k.mutedFg }))
+             : Button("refresh", { icon: "refresh-cw", size: "icon-sm", variant: "ghost", tooltip: "Refresh", onClick: (_e, cx) => { this.force = true; cx.notify(); this.refreshHome(cx); } }))
+           .child(Button("start", { label: "Start work", icon: "plus", size: "sm", onClick: () => this.openStart(null, null, null) })))
+         .when(first, (el) => el.child(v_flex().px(20).py(16).gap(10).child(Skeleton({ h: 14, w: 120 })).child(Skeleton({ h: 30 })).child(Skeleton({ h: 30 })).child(Skeleton({ h: 30 }))))
+         .when(!first, (el) => el.child(v_flex().id("home-body").flex_1().min_h(0).overflow_y_scroll().track_scroll(this.scroll).px(12).pb(12).gap(2).children(kids)));
+     }
+   
   renderBacklog(cx) {
     const t = theme(), q = this.search.value().trim().toLowerCase(), taken = takenIssues(this.live()), me = this.data.me;
     const labels = (i) => (i.labels ?? []).map((l) => l.name);
