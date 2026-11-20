@@ -414,8 +414,7 @@ export default class Forge extends View {
   }
   empty(t, text) { return div().px(8).py(4).text_size(12).text_color(t.dim).child(text); }
 
-     // Home as lanes of rows (model.js homeRow / backlogRow), each with its one action. order: the rows top to bottom, as j/k walk them.
-     // Home's keys (e.keystroke: gpui's chord spelling). true: handled, the caller stops propagation.
+  // Home's keys (e.keystroke: gpui's chord spelling). true: handled, the caller stops propagation.
   homeKey(e, cx) {
     const order = this.order ?? [], i = Math.max(0, order.findIndex((r) => r.key === this.cur)), r = order[i];
     const move = (n) => { const to = order[Math.max(0, Math.min(order.length - 1, n))]; if (to) { this.cur = to.key; this.reveal = true; } };
@@ -432,94 +431,95 @@ export default class Forge extends View {
     cx.notify(); return true;
   }
 
+  // Home as lanes of rows (model.js homeRow / backlogRow), each with its one action. order: the rows top to bottom, as j/k walk them.
   homeView() {
-       const groups = this.homeModel(), now = Date.now(), here = this.hereRepo(), BACKLOG_ROWS = 8;
-       const act = (g, it) => {
-         if (g.key === "planned") return it.root ? { label: it.shelved ? "Resume" : "Start", go: () => this.openStart(it.issue.number, it.root, it.on) } : null;
-         if (it.draft) return this.draftStart(it, it.root, it.on);
-         return it.path ? this.next(it, { root: it.root, on: it.on }) : null;
-       };
-       const jump = (it) => () => { const sp = this.spaceAt(it.path, it.on); if (sp) run("space.select", { id: sp.id }); else run("space.new", { folder: it.path, machine: it.on ?? "" }); }; // a track row jumps to its worktree's space, opening one if it has none
-       const lanes = groups.filter((g) => this.loaded || g.key !== "done") // Done needs this.meBy: hidden until the first load ends
-         .map((g) => ({ key: g.key, title: g.title, count: g.items.length, rows: g.items.map((it) => ({ ...homeRow(g.key, it, now), act: act(g, it), jump: it.path ? jump(it) : null })) }));
-       if (here) { // the shown repo's backlog, minus what is already a track or listed under Up next
-         const cached = shared(issuesKey(here.on, here.root))?.data;
-         const skip = new Set(groups.flatMap((g) => g.items).filter((it) => it.root === here.root && (it.on ?? null) === here.on).flatMap((it) => (it.issue ? [it.issue.number] : it.merged ? [] : it.issues ?? [])));
-         const open = (cached ?? []).filter((i) => !skip.has(i.number) && !(i.labels ?? []).some((l) => l.name === "shelved"));
-         const name = here.root.split("/").pop(), lane = { key: "backlog", title: `Backlog · ${here.on ? `${name} @ ${here.on}` : name}`, here, loading: !cached, count: open.length,
-           rows: open.slice(0, BACKLOG_ROWS).map((i) => ({ ...backlogRow(i, now), act: { label: "Start", go: () => this.openStart(i.number, here.root, here.on) }, jump: null })) };
-         const p = lanes.findIndex((l) => l.key === "planned");
-         lanes.splice(p < 0 ? lanes.length : p + 1, 0, lane);
-       }
-       const errs = [this.homeErr, here ? this.hereErr : null, ...this.repos.filter((r) => r.error).map((r) => { const n = r.root.split("/").pop(); return `${r.on ? `${n} @ ${r.on}` : n}: ${r.error}`; })].filter(Boolean); // every source that failed, for the one header indicator (hereErr only while its backlog is shown: a stale one would also freeze the badge)
-       const shown = lanes.filter((l) => l.key === "needs" || l.key === "backlog" || l.rows.length || errs.length); // an empty lane is not drawn, unless a source failed: then empty may only mean "could not load", and the lane says so
-       return { lanes: shown, errs, order: shown.flatMap((l) => (l.key === "done" && !this.doneOpen ? [] : l.rows)) };
-     }
-   
+    const groups = this.homeModel(), now = Date.now(), here = this.hereRepo(), BACKLOG_ROWS = 8;
+    const act = (g, it) => {
+      if (g.key === "planned") return it.root ? { label: it.shelved ? "Resume" : "Start", go: () => this.openStart(it.issue.number, it.root, it.on) } : null;
+      if (it.draft) return this.draftStart(it, it.root, it.on);
+      return it.path ? this.next(it, { root: it.root, on: it.on }) : null;
+    };
+    const jump = (it) => () => { const sp = this.spaceAt(it.path, it.on); if (sp) run("space.select", { id: sp.id }); else run("space.new", { folder: it.path, machine: it.on ?? "" }); }; // a track row jumps to its worktree's space, opening one if it has none
+    const lanes = groups.filter((g) => this.loaded || g.key !== "done") // Done needs this.meBy: hidden until the first load ends
+      .map((g) => ({ key: g.key, title: g.title, count: g.items.length, rows: g.items.map((it) => ({ ...homeRow(g.key, it, now), act: act(g, it), jump: it.path ? jump(it) : null })) }));
+    if (here) { // the shown repo's backlog, minus what is already a track or listed under Up next
+      const cached = shared(issuesKey(here.on, here.root))?.data;
+      const skip = new Set(groups.flatMap((g) => g.items).filter((it) => it.root === here.root && (it.on ?? null) === here.on).flatMap((it) => (it.issue ? [it.issue.number] : it.merged ? [] : it.issues ?? [])));
+      const open = (cached ?? []).filter((i) => !skip.has(i.number) && !(i.labels ?? []).some((l) => l.name === "shelved"));
+      const name = here.root.split("/").pop(), lane = { key: "backlog", title: `Backlog · ${here.on ? `${name} @ ${here.on}` : name}`, here, loading: !cached, count: open.length,
+        rows: open.slice(0, BACKLOG_ROWS).map((i) => ({ ...backlogRow(i, now), act: { label: "Start", go: () => this.openStart(i.number, here.root, here.on) }, jump: null })) };
+      const p = lanes.findIndex((l) => l.key === "planned");
+      lanes.splice(p < 0 ? lanes.length : p + 1, 0, lane);
+    }
+    const errs = [this.homeErr, here ? this.hereErr : null, ...this.repos.filter((r) => r.error).map((r) => { const n = r.root.split("/").pop(); return `${r.on ? `${n} @ ${r.on}` : n}: ${r.error}`; })].filter(Boolean); // every source that failed, for the one header indicator (hereErr only while its backlog is shown: a stale one would also freeze the badge)
+    const shown = lanes.filter((l) => l.key === "needs" || l.key === "backlog" || l.rows.length || errs.length); // an empty lane is not drawn, unless a source failed: then empty may only mean "could not load", and the lane says so
+    return { lanes: shown, errs, order: shown.flatMap((l) => (l.key === "done" && !this.doneOpen ? [] : l.rows)) };
+  }
 
-     renderHome(cx) {
-       const k = tokens(), { lanes, order, errs } = this.homeView();
-       this.order = order;
-       if (!order.some((r) => r.key === this.cur)) this.cur = order[0]?.key ?? null; // the selection follows the data: a row that left hands over to the first
-       const label = (r) => { const n = r.root.split("/").pop(); return r.on ? `${n} @ ${r.on}` : n; };
-       const note = (text) => div().px(8).py(4).text_size(TEXT.sm).text_color(k.dim).child(text);
-       const glyph = (r) => (r.tone === "working" ? Spinner({ size: 14, color: k.working }) : Icon(r.icon, { size: 14, color: { blocked: k.blocked, done: k.success }[r.tone] ?? k.dim }));
-       const rowEl = (r) => {
-         const on = r.key === this.cur;
-         const actions = h_flex().id(`x-${r.key}`).flex_none().gap(4).items_center().on_mouse_down("left", (_e, cx) => cx.stop_propagation()) // a press on a button is not a press on the row (the same guard as button(), main.js)
-           .when(r.act, (e) => e.child(Button(`a-${r.key}`, { label: r.act.label, size: "sm", variant: on ? "default" : "ghost", kbd: on && r.lane !== "done" ? "⏎" : undefined, onClick: (_e, cx) => { cx.stop_propagation(); r.act.go(cx); } })))
-           .when(r.url, (e) => e.child(Button(`o-${r.key}`, { icon: "external", size: "icon-sm", variant: "ghost", tooltip: "Open on GitHub", onClick: (_e, cx) => { cx.stop_propagation(); this.openGitHub(r.url); } })));
-         const el = h_flex().id(`r-${r.key}`).px(8).gap(10).min_w(0).flex_none().items_center().rounded(RADIUS.md).cursor_pointer()
-           .bg(on ? k.selected : NONE).hover((s) => s.bg(on ? k.selected : k.accent))
-           .on_click((_e, cx) => { this.cur = r.key; cx.notify(); if (r.jump) r.jump(); });
-         return r.dense
-           ? el.h(30)
-             .child(div().w(48).flex_none().child(Mono(r.ref ?? "")))
-             .child(div().flex_1().min_w(0).truncate().child(r.title))
-             .when(!this.narrow(520), (e) => e.child(div().flex_none().max_w(240).truncate().text_size(TEXT.xs).text_color(k.mutedFg).child(r.meta)))
-             .child(actions)
-           : el.py(7)
-             .child(glyph(r))
-             .child(v_flex().flex_1().min_w(0).gap(1)
-               .child(div().truncate().font_medium().child(r.title))
-               .child(div().truncate().text_size(TEXT.xs).text_color(k.mutedFg).child(r.meta)))
-             .child(actions);
-       };
-       const openBacklog = (r) => run("tab.new", { name: "Backlog", mod: "forge", props: { view: "backlog", root: r.root, on: r.on } });
-       const kids = [], at = {}; // the scroll area's direct children, and each row's index among them (scroll_to_item counts direct children)
-       for (const l of lanes) {
-         const folded = l.key === "done" && !this.doneOpen;
-         const title = div().min_w(0).truncate().child(l.title); // an element, so a long "Backlog · repo @ machine" truncates instead of wrapping (SectionHeader's own text cannot shrink)
-         if (l.key === "done") kids.push(SectionHeader(title, { count: l.count, id: "lane-done", action: Icon(folded ? "chevron-right" : "chevron-down", { size: 14, color: k.dim }) }).mt(10).min_w(0).flex_none().cursor_pointer().on_click((_e, cx) => { this.doneOpen = !this.doneOpen; cx.notify(); }));
-         else kids.push(SectionHeader(title, { count: l.key === "backlog" && l.loading ? undefined : l.count, action: l.key === "backlog" ? Button("h-bo", { label: "Open backlog", size: "sm", variant: "ghost", onClick: () => openBacklog(l.here) }) : undefined }).mt(10).min_w(0).flex_none());
-         if (l.key === "needs" && !l.rows.length) kids.push(note(!this.loaded ? "Loading…" : errs.length ? `Can't tell: ${errs[0]}` : "All clear. Nothing is waiting on you.")); // a failed fetch is never "all clear"
-         if (l.key !== "needs" && l.key !== "backlog" && !l.rows.length) kids.push(note("Nothing loaded. A source failed, see the warning above.")); // only drawn when errs is non-empty (homeView)
-         if (l.key === "backlog" && l.loading) kids.push(this.hereErr ? note(this.hereErr) : v_flex().px(8).py(4).gap(8).child(Skeleton({ h: 14 })).child(Skeleton({ h: 14, w: 320 })));
-         if (l.key === "backlog" && !l.loading && !l.rows.length) kids.push(note("No open issues."));
-         if (!folded) for (const r of l.rows) { at[r.key] = kids.length; kids.push(rowEl(r)); }
-         if (l.key === "backlog" && l.count > l.rows.length) kids.push(note(`${l.count - l.rows.length} more in the backlog`));
-       }
-       if (this.reveal) { this.reveal = false; if (at[this.cur] != null) this.scroll.scroll_to_item(at[this.cur]); } // only after a key moved the selection: a wheel scroll is never undone
-       if (this.repos.length) kids.push(h_flex().mt(10).px(8).gap(4).items_center().flex_wrap().flex_none().text_size(TEXT.sm).text_color(k.mutedFg)
-         .child(div().mr(4).child("Backlogs"))
-         .children(this.repos.map((r) => Button(`h-bk-${r.on ?? ""}-${r.root}`, { label: label(r), size: "sm", variant: "ghost", onClick: () => openBacklog(r) }))));
-       const first = !this.loaded && !this.repos.length; // no snapshot yet: the very first open
-       return v_flex().id("root").size_full().bg(k.canvas).text_size(TEXT.base).text_color(k.foreground).on_size_change(this.onSize)
-         .track_focus(this.keys).on_mouse_down("left", () => this.keys.focus()).on_key_down((e, cx) => { if (this.homeKey(e, cx)) cx.stop_propagation(); })
-         .child(h_flex().px(20).py(10).gap(10).items_center().flex_none().border_b(1).border_color(k.border)
-           .child(div().flex_none().font_semibold().text_size(TEXT.lg).child("Forge"))
-           .child(div().flex_1().min_w(0))
-           .when(errs.length, (e) => e.child(h_flex().id("health").min_w(0).flex_shrink(1).gap(6).items_center().text_size(TEXT.xs).text_color(k.warning).tooltip(errs.join(" · "))
-             .child(Icon("triangle-alert", { size: 14, color: k.warning }))
-             .child(div().truncate().min_w(0).child(errs.length === 1 ? errs[0] : `${errs.length} sources are stale`))))
-           .child(this.force ? h_flex().w(28).h(28).flex_none().items_center().justify_center().child(Spinner({ size: 14, color: k.mutedFg }))
-             : Button("refresh", { icon: "refresh-cw", size: "icon-sm", variant: "ghost", tooltip: "Refresh", onClick: (_e, cx) => { this.force = true; cx.notify(); this.refreshHome(cx); } }))
-           .child(Button("start", { label: "Start work", icon: "plus", size: "sm", onClick: () => this.openStart(null, null, null) })))
-         .when(first, (el) => el.child(v_flex().px(20).py(16).gap(10).child(Skeleton({ h: 14, w: 120 })).child(Skeleton({ h: 30 })).child(Skeleton({ h: 30 })).child(Skeleton({ h: 30 }))))
-         .when(!first, (el) => el.child(v_flex().id("home-body").flex_1().min_h(0).overflow_y_scroll().track_scroll(this.scroll).px(12).pb(12).gap(2).children(kids)))
-         .when(!first && !this.narrow(560), (el) => el.child(KeyHints([["j", "down"], ["k", "up"], ["⏎", "run the row's action"], ["o", "open on GitHub"], ["r", "refresh"]])));
-     }
-   
+
+  renderHome(cx) {
+    const k = tokens(), { lanes, order, errs } = this.homeView();
+    this.order = order;
+    if (!order.some((r) => r.key === this.cur)) this.cur = order[0]?.key ?? null; // the selection follows the data: a row that left hands over to the first
+    const label = (r) => { const n = r.root.split("/").pop(); return r.on ? `${n} @ ${r.on}` : n; };
+    const note = (text) => div().px(8).py(4).text_size(TEXT.sm).text_color(k.dim).child(text);
+    const glyph = (r) => (r.tone === "working" ? Spinner({ size: 14, color: k.working }) : Icon(r.icon, { size: 14, color: { blocked: k.blocked, done: k.success }[r.tone] ?? k.dim }));
+    const rowEl = (r) => {
+      const on = r.key === this.cur;
+      const actions = h_flex().id(`x-${r.key}`).flex_none().gap(4).items_center().on_mouse_down("left", (_e, cx) => cx.stop_propagation()) // a press on a button is not a press on the row (the same guard as button(), main.js)
+        .when(r.act, (e) => e.child(Button(`a-${r.key}`, { label: r.act.label, size: "sm", variant: on ? "default" : "ghost", kbd: on && r.lane !== "done" ? "⏎" : undefined, onClick: (_e, cx) => { cx.stop_propagation(); r.act.go(cx); } })))
+        .when(r.url, (e) => e.child(Button(`o-${r.key}`, { icon: "external", size: "icon-sm", variant: "ghost", tooltip: "Open on GitHub", onClick: (_e, cx) => { cx.stop_propagation(); this.openGitHub(r.url); } })));
+      const el = h_flex().id(`r-${r.key}`).px(8).gap(10).min_w(0).flex_none().items_center().rounded(RADIUS.md).cursor_pointer()
+        .bg(on ? k.selected : NONE).hover((s) => s.bg(on ? k.selected : k.accent))
+        .on_click((_e, cx) => { this.cur = r.key; cx.notify(); if (r.jump) r.jump(); });
+      return r.dense
+        ? el.h(30)
+          .child(div().w(48).flex_none().child(Mono(r.ref ?? "")))
+          .child(div().flex_1().min_w(0).truncate().child(r.title))
+          .when(!this.narrow(520), (e) => e.child(div().flex_none().max_w(240).truncate().text_size(TEXT.xs).text_color(k.mutedFg).child(r.meta)))
+          .child(actions)
+        : el.py(7)
+          .child(glyph(r))
+          .child(v_flex().flex_1().min_w(0).gap(1)
+            .child(div().truncate().font_medium().child(r.title))
+            .child(div().truncate().text_size(TEXT.xs).text_color(k.mutedFg).child(r.meta)))
+          .child(actions);
+    };
+    const openBacklog = (r) => run("tab.new", { name: "Backlog", mod: "forge", props: { view: "backlog", root: r.root, on: r.on } });
+    const kids = [], at = {}; // the scroll area's direct children, and each row's index among them (scroll_to_item counts direct children)
+    for (const l of lanes) {
+      const folded = l.key === "done" && !this.doneOpen;
+      const title = div().min_w(0).truncate().child(l.title); // an element, so a long "Backlog · repo @ machine" truncates instead of wrapping (SectionHeader's own text cannot shrink)
+      if (l.key === "done") kids.push(SectionHeader(title, { count: l.count, id: "lane-done", action: Icon(folded ? "chevron-right" : "chevron-down", { size: 14, color: k.dim }) }).mt(10).min_w(0).flex_none().cursor_pointer().on_click((_e, cx) => { this.doneOpen = !this.doneOpen; cx.notify(); }));
+      else kids.push(SectionHeader(title, { count: l.key === "backlog" && l.loading ? undefined : l.count, action: l.key === "backlog" ? Button("h-bo", { label: "Open backlog", size: "sm", variant: "ghost", onClick: () => openBacklog(l.here) }) : undefined }).mt(10).min_w(0).flex_none());
+      if (l.key === "needs" && !l.rows.length) kids.push(note(!this.loaded ? "Loading…" : errs.length ? `Can't tell: ${errs[0]}` : "All clear. Nothing is waiting on you.")); // a failed fetch is never "all clear"
+      if (l.key !== "needs" && l.key !== "backlog" && !l.rows.length) kids.push(note("Nothing loaded. A source failed, see the warning above.")); // only drawn when errs is non-empty (homeView)
+      if (l.key === "backlog" && l.loading) kids.push(this.hereErr ? note(this.hereErr) : v_flex().px(8).py(4).gap(8).child(Skeleton({ h: 14 })).child(Skeleton({ h: 14, w: 320 })));
+      if (l.key === "backlog" && !l.loading && !l.rows.length) kids.push(note("No open issues."));
+      if (!folded) for (const r of l.rows) { at[r.key] = kids.length; kids.push(rowEl(r)); }
+      if (l.key === "backlog" && l.count > l.rows.length) kids.push(note(`${l.count - l.rows.length} more in the backlog`));
+    }
+    if (this.reveal) { this.reveal = false; if (at[this.cur] != null) this.scroll.scroll_to_item(at[this.cur]); } // only after a key moved the selection: a wheel scroll is never undone
+    if (this.repos.length) kids.push(h_flex().mt(10).px(8).gap(4).items_center().flex_wrap().flex_none().text_size(TEXT.sm).text_color(k.mutedFg)
+      .child(div().mr(4).child("Backlogs"))
+      .children(this.repos.map((r) => Button(`h-bk-${r.on ?? ""}-${r.root}`, { label: label(r), size: "sm", variant: "ghost", onClick: () => openBacklog(r) }))));
+    const first = !this.loaded && !this.repos.length; // no snapshot yet: the very first open
+    return v_flex().id("root").size_full().bg(k.canvas).text_size(TEXT.base).text_color(k.foreground).on_size_change(this.onSize)
+      .track_focus(this.keys).on_mouse_down("left", () => this.keys.focus()).on_key_down((e, cx) => { if (this.homeKey(e, cx)) cx.stop_propagation(); })
+      .child(h_flex().px(20).py(10).gap(10).items_center().flex_none().border_b(1).border_color(k.border)
+        .child(div().flex_none().font_semibold().text_size(TEXT.lg).child("Forge"))
+        .child(div().flex_1().min_w(0))
+        .when(errs.length, (e) => e.child(h_flex().id("health").min_w(0).flex_shrink(1).gap(6).items_center().text_size(TEXT.xs).text_color(k.warning).tooltip(errs.join(" · "))
+          .child(Icon("triangle-alert", { size: 14, color: k.warning }))
+          .child(div().truncate().min_w(0).child(errs.length === 1 ? errs[0] : `${errs.length} sources are stale`))))
+        .child(this.force ? h_flex().w(28).h(28).flex_none().items_center().justify_center().child(Spinner({ size: 14, color: k.mutedFg }))
+          : Button("refresh", { icon: "refresh-cw", size: "icon-sm", variant: "ghost", tooltip: "Refresh", onClick: (_e, cx) => { this.force = true; cx.notify(); this.refreshHome(cx); } }))
+        .child(Button("start", { label: "Start work", icon: "plus", size: "sm", onClick: () => this.openStart(null, null, null) })))
+      .when(first, (el) => el.child(v_flex().px(20).py(16).gap(10).child(Skeleton({ h: 14, w: 120 })).child(Skeleton({ h: 30 })).child(Skeleton({ h: 30 })).child(Skeleton({ h: 30 }))))
+      .when(!first, (el) => el.child(v_flex().id("home-body").flex_1().min_h(0).overflow_y_scroll().track_scroll(this.scroll).px(12).pb(12).gap(2).children(kids)))
+      .when(!first && !this.narrow(560), (el) => el.child(KeyHints([["j", "down"], ["k", "up"], ["⏎", "run the row's action"], ["o", "open on GitHub"], ["r", "refresh"]])));
+  }
+
   renderBacklog(cx) {
     const t = theme(), q = this.search.value().trim().toLowerCase(), taken = takenIssues(this.live()), me = this.data.me;
     const labels = (i) => (i.labels ?? []).map((l) => l.name);
