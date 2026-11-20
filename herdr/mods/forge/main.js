@@ -3,7 +3,7 @@
 // from git worktrees, the docs on each branch, gh PRs/issues and the host's agents.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle, TextView, InputState, Input, TextareaState, Textarea, EditorState, Editor } from "gpui-base";
-import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, setShared, shared } from "herdr";
+import { spaces, panes, agents, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, run, props, home, appHome, knownAgents, openOverlay, closeOverlay, setShared, shared, setBadge } from "herdr";
 import { writeFile, mkdir, readdir, readFile } from "fs/promises"; // allowed: writes under ~/.config/herdr-app, reads under home (AGENTS.md "Other built-ins")
 import { nextLabel, chip, lead, parseWorktrees, kind, planTasks, tracks, agentsOn, takenIssues, isParked, parkedFrom, branchFor, shelfBranch, slimPr, trackFor, homeGroups, drafts, DONE_WINDOW_MS, cacheLife, newest, REPO_SCRIPT, parseRepo, slimIssue, repoFor, spaceFor, homeRow, backlogRow } from "./model.js";
 import { RADIUS, TEXT, tokens, Icon, Spinner, Button, Skeleton, SectionHeader, KeyHints, Mono } from "./ui.js";
@@ -275,7 +275,7 @@ export default class Forge extends View {
         cx.notify();
         this.warmIssues(out.filter((r) => !r.error)); // not awaited: the refresh is done, this trickles behind it
         if (spaces().length && !unreachable.size) this.prune(out); // only on a full picture: a loading layout or an unreachable machine hides repos that are still there
-      } finally { this.refreshing = false; if (forced) this.force = false; cx.notify(); }
+      } finally { this.refreshing = false; if (forced) this.force = false; this.syncBadge(null, true); cx.notify(); }
     });
   }
   // Home's last result in shared.json, so a new Home tab paints at once and refreshes behind it: the repo list here, each repo's data
@@ -431,6 +431,16 @@ export default class Forge extends View {
     cx.notify(); return true;
   }
 
+  // Dock badge = the Needs-you count. render calls it with the count it already has, and only a change reaches Herdr. refreshHome calls it
+  // forced every GH_TTL: the badge is global, so another Home copy that closed (close() clears it) is repaired within a minute.
+  // A failed source means the count is unknown, not zero: keep the last badge.
+  syncBadge(n = null, force = false) {
+    if (!this.loaded) return;
+    if (n === null) { const v = this.homeView(); if (v.errs.length) return; n = v.lanes.find((l) => l.key === "needs")?.rows.length ?? 0; }
+    if (!force && n === this.badge) return;
+    this.badge = n; setBadge(n ? String(n) : null);
+  }
+
   // Home as lanes of rows (model.js homeRow / backlogRow), each with its one action. order: the rows top to bottom, as j/k walk them.
   homeView() {
     const groups = this.homeModel(), now = Date.now(), here = this.hereRepo(), BACKLOG_ROWS = 8;
@@ -460,6 +470,7 @@ export default class Forge extends View {
   renderHome(cx) {
     const k = tokens(), { lanes, order, errs } = this.homeView();
     this.order = order;
+    if (!errs.length) this.syncBadge(lanes.find((l) => l.key === "needs")?.rows.length ?? 0); // live: a newly blocked agent re-renders Home by itself
     if (!order.some((r) => r.key === this.cur)) this.cur = order[0]?.key ?? null; // the selection follows the data: a row that left hands over to the first
     const label = (r) => { const n = r.root.split("/").pop(); return r.on ? `${n} @ ${r.on}` : n; };
     const note = (text) => div().px(8).py(4).text_size(TEXT.sm).text_color(k.dim).child(text);
@@ -834,6 +845,9 @@ export default class Forge extends View {
 
   // Which view this copy is. mod.open:forge (the ⌘⇧N key) opens the overlay with props {overlay} only — verified live 2026-11-06.
   // A docked layout block from before this change gets no props at all: "moved".
+  // Herdr's lifecycle hook (AGENTS.md "Cleanup"): this Home tab is going, so it no longer keeps the badge true. Another open Home copy sets it again on its next refresh (syncBadge).
+  async close() { if (this.route() === "home") setBadge(null); }
+
   route() {
     const p = props() ?? {};
     if (p.view === "start" || (p.overlay && !p.view)) return "start";
