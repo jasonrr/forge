@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { stemOf, plan, diffCommand, buildPage, due } from './show.mjs'
+import { stemOf, plan, diffCommand, buildPage, due, pickerRows, pickedFrom } from './show.mjs'
 
 const SHOW = new URL('./show.mjs', import.meta.url).pathname
 const tmp = () => mkdtempSync(join(tmpdir(), 'forge-show-'))
@@ -90,6 +90,9 @@ const rig = (herdrBody) => {
   const fake = (name, body) => { writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`); chmodSync(join(bin, name), 0o755) }
   fake('herdr-app', `echo "$*" >> '${log}'\nif [ "$1" = ls ]; then echo '{"spaces":[{"tabs":[{"terminals":[{"terminal":"t1","pane":"p1"},{"terminal":"t9","pane":"p9"}]}]}]}'; else ${herdrBody}; fi`)
   fake('defaults', 'echo Dark')
+  fake('hc', `echo "hc $*" >> '${log}'\nif [ "$1" = run ]; then echo '{"address":"t9"}'; fi`)
+  writeFileSync(join(bin, 'ack'), `#!/usr/bin/env node\nconst fs = require('fs'), d = process.env.FORGE_SHOW_DIR\nfs.writeFileSync(d + '/ack.json', JSON.stringify({ id: JSON.parse(fs.readFileSync(d + '/request.json')).id }))\n`)
+  chmodSync(join(bin, 'ack'), 0o755)
   const env = { FORGE_SHOW_DIR: dir, FORGE_SHOW_PATH_FIRST: bin, HC_TERMINAL_ID: 't1', HOME: tmp() }
   return { dir, env, calls: () => readFileSync(log, 'utf8'), theme: () => writeFileSync(join(dir, 'theme.json'), JSON.stringify({ key: 'null|Dark', theme: {}, settings: {} })) }
 }
@@ -130,4 +133,35 @@ test('open closes a stale page pane when the view has no page blocks', () => {
   assert.equal(r.status, 0, r.stderr)
   assert.match(t.calls(), /do pane\.close --pane p9/)
   assert.equal(JSON.parse(readFileSync(join(t.dir, 't1-chk.json'), 'utf8')).panes.page, undefined)
+})
+
+test('pickerRows and pickedFrom', () => {
+  const block = { options: [{ label: 'A\tx' }, { label: 'B\ny' }] }
+  assert.deepEqual(pickerRows(block), ['0\tA x', '1\tB y'])
+  assert.equal(pickedFrom(block, '1\tB y\n'), block.options[1])
+  assert.equal(pickedFrom(block, ''), undefined)
+  assert.equal(pickedFrom(block, '9\tZ'), undefined)
+})
+
+const choice = { pane: 'ask', title: 't', blocks: [{ type: 'choice', options: [{ label: 'A' }, { label: 'B' }] }] }
+
+test('open asks a choice in a floating window', () => {
+  const t = rig('if [ "$2" = mod.open ]; then ack; fi')
+  t.theme()
+  const r = open(choice, t.env)
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(JSON.parse(r.stdout).result, /^Asked in a floating window/)
+  const req = JSON.parse(readFileSync(join(t.dir, 'request.json'), 'utf8'))
+  assert.equal(req.floats[0].terminal, 't9')
+  assert.equal(req.floats[0].key, 'show-t9')
+  assert.match(t.calls(), /hc run --bg --json --no-notify --rm node \S+show\.mjs pick t1-ask 0/)
+  assert.equal(t.calls().match(/mod\.open/g).length, 1)
+})
+
+test('open denies and kills the picker when the float does not open', () => {
+  const t = rig('true')
+  t.theme()
+  const r = open(choice, { ...t.env, FORGE_SHOW_ACK_MS: '300' })
+  assert.match(JSON.parse(r.stdout).deny, /^forge show could not open the question window/)
+  assert.match(t.calls(), /hc kill t9/)
 })

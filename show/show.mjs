@@ -2,13 +2,14 @@
 //   open            reads one JSON view on stdin and prints one JSON line, {"result"} or {"deny"}
 //   serve <stem>    the page pane's program: shows the page and keeps command blocks fresh
 //   log <stem> <n>  a log pane's program
+//   pick <stem> <n> a floating window's program: asks a choice or confirm block and sends the answer to the session
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { readFileSync, writeFileSync, renameSync, mkdirSync, rmdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createInterface } from 'node:readline'
-import { PAGE, specError, rowsFrom } from './blocks.mjs'
+import { PAGE, specError, rowsFrom, answerText } from './blocks.mjs'
 import { palette, pageBlocks, pageHtml } from './page.mjs'
 
 const SELF = fileURLToPath(import.meta.url)
@@ -18,10 +19,8 @@ const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 
 const read = (file) => JSON.parse(readFileSync(file, 'utf8'))
 const first200 = (e) => String(e?.message ?? e).slice(0, 200)
 
-function sh(argv, opts) {
-  const PATH = [process.env.FORGE_SHOW_PATH_FIRST, `${homedir()}/.local/bin`, '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH].filter(Boolean).join(':')
-  return execFileSync(argv[0], argv.slice(1), { encoding: 'utf8', env: { ...process.env, PATH }, timeout: 10000, ...opts })
-}
+const env = () => ({ ...process.env, PATH: [process.env.FORGE_SHOW_PATH_FIRST, `${homedir()}/.local/bin`, '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH].filter(Boolean).join(':') })
+const sh = (argv, opts) => execFileSync(argv[0], argv.slice(1), { encoding: 'utf8', env: env(), timeout: 10000, ...opts })
 
 const runShell = (command, cwd) => sh(['sh', '-c', command], { cwd, timeout: 20000, maxBuffer: 8 << 20 })
 const herdr = (...args) => JSON.parse(sh(['herdr-app', 'do', ...args]))
@@ -29,6 +28,8 @@ const enter = () => new Promise((done) => createInterface({ input: process.stdin
 
 export const stemOf = (terminal, pane) => terminal.toLowerCase().replace(/[^a-z0-9]/g, '-') + '-' + pane
 export const shq = (text) => "'" + text.replace(/'/g, "'\\''") + "'"
+export const pickerRows = (block) => block.options.map((o, i) => `${i}\t${o.label.replace(/[\t\r\n]/g, ' ')}`)
+export const pickedFrom = (block, stdout) => block.options[Number.parseInt(stdout, 10)]
 export const diffCommand = (block) => 'git -C ' + shq(block.repo) + ' diff --no-color --no-ext-diff ' + shq(block.base ?? 'HEAD') + ' --'
 
 export function plan(view) {
@@ -133,7 +134,6 @@ function open(view) {
   const me = terminals.find((t) => t.terminal === terminal)
   if (!me) return { deny: "forge show could not find this session's pane in the Herdr app." }
   const { page, logs, asks } = plan(view)
-  if (asks.length) return { deny: 'choice and confirm are not built yet' }
 
   const stem = stemOf(terminal, view.pane)
   const cwd = view.cwd ?? process.cwd()
@@ -147,7 +147,21 @@ function open(view) {
   const key = themeKey()
   let current = false
   try { current = read(path('theme.json')).key === key } catch { /* missing */ }
-  if (!current) askHelper(key, true, [])
+  const floats = []
+  let floatsOpen
+  try {
+    for (const n of asks) {
+      const { address } = JSON.parse(sh(['hc', 'run', '--bg', '--json', '--no-notify', '--rm', 'node', SELF, 'pick', stem, String(n)]))
+      floats.push({ terminal: address, key: 'show-' + address, width: 640, height: 320 })
+    }
+    const acked = current && !floats.length ? true : askHelper(key, !current, floats)
+    floatsOpen = acked || !floats.length
+    for (const f of floats) sh(['hc', 'get', f.terminal], { stdio: 'ignore' })
+  } catch { floatsOpen = false }
+  if (!floatsOpen) {
+    for (const f of floats) try { sh(['hc', 'kill', f.terminal]) } catch { /* it may be gone already */ }
+    return { deny: 'forge show could not open the question window (is the forge-show helper mod installed? run scripts/install-herdr-mod.sh).' }
+  }
 
   let opened = false
   try {
@@ -174,15 +188,16 @@ function open(view) {
   } finally {
     put(path(stem + '.json'), JSON.stringify({ ...stored, panes }))
   }
+  if (!page.length && !logs.length) return { result: "Asked in a floating window; the answer arrives as the person's next message. They click the window first." }
   try { herdr('pane.focus', '--terminal', terminal) } catch { /* focus is a nicety */ }
-  return { result: opened ? `Opened the ${view.pane} pane beside this session.` : `Updated the ${view.pane} pane.` }
+  return { result: (opened ? `Opened the ${view.pane} pane beside this session.` : `Updated the ${view.pane} pane.`) + (asks.length ? ' Also asked a question in a floating window.' : '') }
 }
 
 async function serve(stem) {
   const file = path(stem + '.html')
   const child = spawn('terminal-browser', ['open', file], {
     stdio: 'inherit',
-    env: { ...process.env, PATH: [process.env.FORGE_SHOW_PATH_FIRST, `${homedir()}/.local/bin`, '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH].filter(Boolean).join(':') },
+    env: env(),
   })
   child.on('exit', (code) => process.exit(code ?? 0))
   child.on('error', async () => {
@@ -226,6 +241,30 @@ async function log(stem, n) {
   }
 }
 
+async function choose(block, header, preview) {
+  const args = ['--reverse', '--delimiter=\t', '--with-nth=2..', '--header', header, ...(preview ? ['--preview', preview, '--preview-window', 'right,50%'] : [])]
+  const r = spawnSync('fzf', args, { input: pickerRows(block).join('\n'), stdio: ['pipe', 'pipe', 'inherit'], encoding: 'utf8', env: env() })
+  if (!r.error) return r.status === 0 ? pickedFrom(block, r.stdout) : undefined
+  console.log(header)
+  block.options.forEach((o, i) => console.log(`${i + 1}) ${o.label}`))
+  return block.options[Number(await enter()) - 1]
+}
+
+async function pick(stem, n) {
+  const view = read(path(stem + '.json'))
+  const block = view.blocks[n]
+  const confirm = block.type === 'confirm'
+  if (confirm) console.log(block.summary + (block.consequence ? '\n' + block.consequence : ''))
+  const options = confirm ? [{ label: block.confirm_label ?? 'Confirm' }, { label: 'Cancel' }] : block.options
+  const preview = !confirm && options.some((o) => o.preview) && 'node ' + shq(SELF) + ' preview ' + shq(stem) + ' ' + n + ' {1}'
+  const chosen = await choose({ options }, block.prompt ?? view.title, preview)
+  if (!chosen) return
+  try { sh(['hc', 'send', view.terminal, answerText(view.pane, block, confirm ? { confirmed: chosen === options[0] } : chosen)]) } catch (e) {
+    console.log(first200(e))
+    await enter()
+  }
+}
+
 async function main([cmd, ...args]) {
   if (cmd === 'open') {
     const text = readFileSync(0, 'utf8')
@@ -234,6 +273,8 @@ async function main([cmd, ...args]) {
     console.log(JSON.stringify(open(view)))
   } else if (cmd === 'serve') await serve(args[0])
   else if (cmd === 'log') await log(args[0], Number(args[1]))
+  else if (cmd === 'pick') await pick(args[0], Number(args[1]))
+  else if (cmd === 'preview') console.log(read(path(args[0] + '.json')).blocks[args[1]].options[args[2]].preview ?? '')
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
