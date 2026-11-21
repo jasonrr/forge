@@ -54,3 +54,39 @@ test("pageHtml escapes and embeds", () => {
   assert.ok(html.includes("t1-p.v.js"))
   assert.ok(html.includes("--bg: #111720"))
 })
+
+const gen = (o = {}) => pageHtml({ stem: "s", title: "t", blocks: [], palette: palette(), version: "v1", ...o })
+
+test("pageHtml cannot be broken out of the script via stem or version", () => {
+  const html = gen({ stem: "a</script><script>alert(1)//", version: 'v"</script><img src=x onerror=alert(1)>' })
+  assert.ok(!html.includes("</script><script>alert(1)"))
+  assert.ok(!html.includes("</script><img"))
+})
+
+test("page script drops markdown images", () => {
+  assert.ok(/marked\.use\([^\n]*image: \(href, title, text\)/.test(gen()))
+})
+
+test("page script survives a bad mermaid block and a bad chart", () => {
+  const html = gen()
+  assert.ok(html.includes("suppressErrors: true"))
+  assert.ok(html.includes("try { draw() } catch (err) { console.error(err) }"))
+})
+
+test("page script moves chart value-axis options with the flipped axis", () => {
+  const html = gen()
+  assert.ok(html.includes("const hz = b.horizontal || (b.kind === 'bar' && b.rows.length > 12)"))
+  assert.ok(html.includes("indexAxis: hz ?"))
+  assert.ok(html.includes("hz ? { x: scale } : { y: scale }"))
+})
+
+test("page script gives charts and mermaid a font stack", () => {
+  const html = gen()
+  assert.ok(html.includes("BlinkMacSystemFont, sans-serif'"))
+  assert.ok(html.includes("fontFamily: FONT"))
+  assert.ok(html.includes("Chart.defaults.font.family = FONT"))
+})
+
+test("diff2html inherits the page colours", () => {
+  assert.ok(gen().includes(".d2h-file-list-wrapper, .d2h-files-diff"))
+})

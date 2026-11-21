@@ -63,8 +63,11 @@ export function pageBlocks(blocks, extra) {
   })
 }
 
+const js = (v) => JSON.stringify(v).replace(/</g, "\\u003c")
+
+// `palette` must come from `palette()`: its values are interpolated into CSS unescaped.
 export function pageHtml({ stem, title, blocks, palette: p, version }) {
-  const data = JSON.stringify({ title, blocks, palette: p }).replace(/</g, "\\u003c")
+  const data = js({ title, blocks, palette: p })
   const heading = title.replace(/[<&]/g, (c) => (c === "<" ? "&lt;" : "&amp;"))
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -100,6 +103,7 @@ img { max-width: 100%; border-radius: 6px; }
 .zbar { position: absolute; top: 8px; right: 8px; z-index: 1; display: flex; gap: 4px; }
 .zbar button { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 2px 9px; font: inherit; cursor: pointer; }
 .d2h-wrapper { --d2h-bg-color: var(--bg); }
+.d2h-wrapper, .d2h-file-wrapper, .d2h-file-header, .d2h-file-list-wrapper, .d2h-files-diff, .d2h-file-diff, .d2h-code-wrapper { background: var(--bg); color: var(--text); border-color: var(--line); }
 .error { color: var(--red); }
 .note { color: var(--dim); }
 </style></head>
@@ -115,10 +119,13 @@ img { max-width: 100%; border-radius: 6px; }
 const spec = JSON.parse(document.getElementById('spec').textContent)
 const P = spec.palette
 const SERIES = P.series
+const FONT = '"' + P.font + '", -apple-system, BlinkMacSystemFont, sans-serif'
 const view = document.getElementById('view')
 const el = (tag, props = {}, children = []) => { const e = Object.assign(document.createElement(tag), props); e.append(...children); return e }
 // why: blocks are written by a model that may have read untrusted text; the page opens with no prompt.
-marked.use({ renderer: { html: (t) => String(typeof t === 'string' ? t : t.text ?? t.raw ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;') } })
+// Images belong in image blocks: a markdown image would be fetched with no prompt.
+const esc = (t) => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
+marked.use({ renderer: { html: (t) => esc(typeof t === 'string' ? t : t.text ?? t.raw), image: (href, title, text) => esc(typeof href === 'object' && href ? href.text : text) } })
 // A chart measures its box, so it is drawn once the page holds it.
 const later = []
 const render = {
@@ -148,14 +155,15 @@ const render = {
     const donut = b.kind === 'donut', stacked = Boolean(b.stacked || b.percent)
     const totals = b.rows.map(r => ys.reduce((sum, c) => sum + (r[b.columns.indexOf(c)] ?? 0), 0))
     const value = (r, i, c) => { const v = r[b.columns.indexOf(c)]; return b.percent && v !== null && totals[i] ? (v / totals[i]) * 100 : v }
-    Chart.defaults.color = P.dim; Chart.defaults.borderColor = P.line; Chart.defaults.font.family = P.font
+    Chart.defaults.color = P.dim; Chart.defaults.borderColor = P.line; Chart.defaults.font.family = FONT
     const datasets = donut
       ? [{ label: ys[0], data: b.rows.map(r => r[b.columns.indexOf(ys[0])]), backgroundColor: b.rows.map((_, i) => SERIES[i % SERIES.length]), borderColor: P.bg, borderWidth: 2 }]
       : ys.map((c, i) => ({ label: c, data: b.rows.map((r, j) => value(r, j, c)), borderColor: SERIES[i % SERIES.length], backgroundColor: b.kind === 'area' ? SERIES[i % SERIES.length] + (stacked ? '99' : '33') : SERIES[i % SERIES.length],
           fill: b.kind === 'area' ? (stacked && i > 0 ? '-1' : 'origin') : false, pointRadius: 0, tension: .2 }))
+    const hz = b.horizontal || (b.kind === 'bar' && b.rows.length > 12)
     const scale = { stacked, ...(b.percent ? { max: 100, ticks: { callback: v => v + '%' } } : typeof b.unit === 'string' ? { ticks: { callback: v => v + ' ' + b.unit } } : {}) }
     const options = donut ? { maintainAspectRatio: false, animation: false, cutout: '62%', plugins: { legend: { position: 'right' } } }
-      : { maintainAspectRatio: false, animation: false, indexAxis: b.horizontal || (b.kind === 'bar' && b.rows.length > 12) ? 'y' : 'x', scales: { x: { stacked }, y: { stacked }, ...(b.horizontal ? { x: scale } : { y: scale }) } }
+      : { maintainAspectRatio: false, animation: false, indexAxis: hz ? 'y' : 'x', scales: { x: { stacked }, y: { stacked }, ...(hz ? { x: scale } : { y: scale }) } }
     later.push(() => new Chart(canvas, { type: donut ? 'doughnut' : b.kind === 'area' ? 'line' : b.kind, data: { labels: b.rows.map(r => r[xi]), datasets }, options }))
     return el('div', { className: donut ? 'chart donut' : 'chart' }, [canvas])
   },
@@ -195,9 +203,9 @@ for (const b of spec.blocks) {
   try { view.append(render[b.type](b)) } catch (err) { view.append(el('p', { className: 'error', textContent: String(err) })) }
 }
 ;(async () => {
-  for (const draw of later) draw()
-  mermaid.initialize({ startOnLoad: false, theme: 'base', themeVariables: { darkMode: P.dark, background: P.panel, primaryColor: P.panel, primaryTextColor: P.text, primaryBorderColor: P.accent, lineColor: P.dim, textColor: P.text, fontFamily: P.font } })
-  await mermaid.run({ querySelector: '.mermaid' })
+  for (const draw of later) { try { draw() } catch (err) { console.error(err) } }
+  mermaid.initialize({ startOnLoad: false, theme: 'base', themeVariables: { darkMode: P.dark, background: P.panel, primaryColor: P.panel, primaryTextColor: P.text, primaryBorderColor: P.accent, lineColor: P.dim, textColor: P.text, fontFamily: FONT } })
+  try { await mermaid.run({ querySelector: '.mermaid', suppressErrors: true }) } catch (err) { console.error(err) }
   for (const box of document.querySelectorAll('.zoom')) {
     const svg = box.querySelector('svg'); if (!svg) continue
     let k = 1, x = 0, y = 0, drag = null
@@ -212,10 +220,10 @@ for (const b of spec.blocks) {
     box.addEventListener('pointerup', () => { drag = null })
   }
 })()
-window.__seen=${JSON.stringify(version)}
+window.__seen=${js(version)}
 setInterval(() => {
   const s = document.createElement('script')
-  s.src = ${JSON.stringify(stem + ".v.js")} + '?t=' + Date.now()
+  s.src = ${js(stem + ".v.js")} + '?t=' + Date.now()
   s.onload = () => { s.remove(); if (window.__v !== undefined && window.__v !== window.__seen) location.reload() }
   s.onerror = () => s.remove()
   document.head.appendChild(s)
