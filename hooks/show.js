@@ -51,11 +51,14 @@ export function register(on) {
 
   // A view that runs commands asks first; the rest only writes forge's cache and splits a pane.
   // If the blocks cannot be found on the event, ask: never allow what could not be inspected.
-  on('tool.check', { tool: TOOL }, async (_$, e) => {
+  on('tool.check', { tool: TOOL }, async (_$, e, next) => {
     const blocks = Array.isArray(e?.input?.blocks) ? e.input.blocks : Array.isArray(e?.blocks) ? e.blocks : undefined
     if (!blocks) return { decision: 'ask', reason: 'forge show could not read this call’s blocks to check for commands.' }
     const commands = commandsOf(blocks)
-    return commands.length > 0 ? { decision: 'ask', reason: `The pane will run: ${commands.join(' ; ')}` } : { decision: 'allow' }
+    if (commands.length > 0) return { decision: 'ask', reason: `The pane will run: ${commands.join(' ; ')}` }
+    // Allow without a prompt, but never over a deny from the person's rules or another plugin.
+    const beneath = await next(e)
+    return beneath?.decision === 'deny' ? beneath : { decision: 'allow' }
   }).catch(() => ({ decision: 'ask', reason: 'forge show could not check this call for commands.' }))
 
   // why tool.run and not tool.call: a hook that answers at tool.call skips the permission check above.
@@ -69,7 +72,7 @@ export function register(on) {
       if (typeof out.result === 'string') return { result: out.result }
     } catch { /* fall through */ }
     return { deny: `forge show failed: ${(done.stderr || done.stdout || 'no output').trim().slice(0, 400)}` }
-  }).catch((_$, err) => ({ deny: `forge show failed: ${String(err?.message ?? err).slice(0, 400)}` }))
+  }).catch((_$, _e, next) => ({ deny: `forge show failed: ${String(next?.error?.message ?? next?.error?.kind ?? 'the hook failed').slice(0, 400)}` }))
 
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
