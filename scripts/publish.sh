@@ -24,8 +24,9 @@ esac
 ! git rev-parse -q --verify "refs/tags/v$new" >/dev/null || die "tag v$new already exists"
 
 bash hooks/session-start.test.sh
+node --test show/*.test.mjs
 node --experimental-strip-types --no-warnings --input-type=module -e 'await import(new URL("pi/extensions/routing.ts", "file://" + process.cwd() + "/"))'
-if command -v herdr-app >/dev/null; then herdr-app check herdr/mods/forge; else echo "publish: no herdr-app here; skipping the mod check"; fi
+if command -v herdr-app >/dev/null; then herdr-app check herdr/mods/forge && herdr-app check herdr/mods/forge-show; else echo "publish: no herdr-app here; skipping the mod check"; fi
 
 # perl, not sed -i: same syntax on macOS and Linux; keeps the files' formatting.
 perl -pi -e "s/\"version\": \"\Q$cur\E\"/\"version\": \"$new\"/" .claude-plugin/plugin.json .codex-plugin/plugin.json package.json

@@ -43,4 +43,12 @@ Home also shows the backlog of the repo whose space it is open in. Every view pa
 
 Install it with `bash scripts/install-herdr-mod.sh`. It symlinks `herdr/mods/forge` into `~/.config/herdr-app/mods/forge`, adds ⌘⇧H (Home), ⌘⇧N (Start work) and ⌘⇧J (track pane) to `keys.json` without replacing a binding you already have, and prints the command to hide the old docked block. To go back to the docked sidebar, run the script from a checkout of the older version, and run `herdr-app do layout.show '{"id":"<id>"}'`.
 
+## Show
+
+Inside the Herdr desktop app, Claude can draw charts, stat tiles, tables, flow and sequence diagrams, Mermaid, images, diffs, logs and markdown in a pane beside the session. It can also ask a choice or confirm question in a floating window. It uses the `mcp__forge__show` tool, and the session's own words stay short because the picture carries the answer.
+
+It needs the Herdr desktop app, `terminal-browser`, and `fzf` for choice and confirm questions. `bash scripts/install-herdr-mod.sh` links the `forge-show` helper mod (it supplies the app theme and opens the question window) along with the work panel mod. The page loads Chart.js and Mermaid from jsdelivr, so it needs a network connection.
+
+It is on for every Claude Code session inside the Herdr app. No `routing: on` is needed, and it does nothing outside the app.
+
 MIT.
