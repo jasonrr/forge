@@ -63,3 +63,7 @@ New kind of file for forge: a hooks module (forge is skills + one hook + one pi 
 - Tool name the model sees. Keeping the block shapes means only the name in the "Drawing results" text changes.
 - Shell route for Codex and pi (instructions to call the script, and a way to carry the "Drawing results" text outside `routing: on` repos): deferred, issue opened.
 - Cockpit is uninstalled only after forge's show has been used for real; uninstalling is the owner's step, not part of the build.
+
+## Deviations
+
+- T1 commit 2d5c576, c84085e — deviation: one review fix round (null view, command output shape check, empty actor label, carriage returns, numeric answer values); duplicate actor lines in a sequence left as is (Mermaid accepts them) — parked: none
