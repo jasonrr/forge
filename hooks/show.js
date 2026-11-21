@@ -41,7 +41,10 @@ const DRAWING = {
 
 const inApp = async ($) => Boolean(await $.env.get('HC_TERMINAL_ID').catch(() => undefined))
 // The same rule as show/blocks: a block with a command runs it. Kept here because a hooks module imports nothing.
-const commandsOf = (blocks) => blocks.map((b) => b?.command).filter((c) => typeof c === 'string' && c.trim() !== '')
+const commandsOf = (blocks) => blocks.filter((b) => typeof b?.command === 'string' && b.command.trim() !== '')
+// Table and chart commands always repeat (default 60 s); a log block repeats only with every.
+const repeats = (b) => { const every = typeof b.every === 'number' ? b.every : undefined; return ['table', 'chart'].includes(b.type) ? every ?? 60 : every }
+const described = (b) => JSON.stringify(b.command).slice(0, 300) + (repeats(b) === undefined ? '' : ` (repeats every ${repeats(b)} s)`)
 
 export function register(on) {
   on('session.start', async ($, e, next) => {
@@ -55,7 +58,8 @@ export function register(on) {
     const blocks = Array.isArray(e?.input?.blocks) ? e.input.blocks : Array.isArray(e?.blocks) ? e.blocks : undefined
     if (!blocks) return { decision: 'ask', reason: 'forge show could not read this call’s blocks to check for commands.' }
     const commands = commandsOf(blocks)
-    if (commands.length > 0) return { decision: 'ask', reason: `The pane will run: ${commands.join(' ; ')}` }
+    if (commands.length > 0) return { decision: 'ask', reason: `The pane will run ${commands.length} command(s): ${commands.map(described).join(' ; ')}` }
+    // A person's own ask rule for this tool is not told apart from the default ask, so command-free views are not prompted for.
     // Allow without a prompt, but never over a deny from the person's rules or another plugin.
     const beneath = await next(e)
     return beneath?.decision === 'deny' ? beneath : { decision: 'allow' }

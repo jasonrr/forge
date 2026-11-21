@@ -137,6 +137,7 @@ export function specError(view) {
   for (const [i, b] of view.blocks.entries()) {
     const p = `/blocks/${i}`
     if (!TYPES.includes(b.type)) return err(`${p}/type`, `one of ${TYPES.join(', ')}`)
+    if (b.command !== undefined && !['table', 'chart', 'log'].includes(b.type)) return err(`${p}/command`, 'only table, chart and log blocks take a command')
     const e = optStr(b, 'title', p) ?? CHECKS[b.type](b, p)
     if (e) return e
   }

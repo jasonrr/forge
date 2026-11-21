@@ -1,10 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, readdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, readdirSync, statSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { stemOf, plan, diffCommand, buildPage, due, pickerRows, pickedFrom, pickerHeader } from './show.mjs'
+import { stemOf, plan, diffCommand, buildPage, due, pickerRows, pickedFrom, pickerHeader, plain } from './show.mjs'
 
 const SHOW = new URL('./show.mjs', import.meta.url).pathname
 const tmp = () => mkdtempSync(join(tmpdir(), 'forge-show-'))
@@ -23,14 +23,27 @@ test('diffCommand quotes the repo', () => {
 test('buildPage fills command blocks from data', () => {
   const view = { terminal: 't1', pane: 'p', title: 't', cwd: '/', blocks: [{ type: 'log', command: 'l' }, { type: 'table', command: 'x' }] }
   const run = () => assert.fail('run must not be called')
-  assert.match(buildPage(view, undefined, 'v', { run, data: { 1: { columns: ['a'], rows: [[1]] } } }), /"columns":\["a"\]/)
-  assert.match(buildPage(view, undefined, 'v', { run, data: {} }), /"loading":true/)
-  assert.match(buildPage(view, undefined, 'v', { run, data: { 1: { error: 'boom' } } }), /boom/)
+  assert.match(buildPage(view, undefined, { run, data: { 1: { columns: ['a'], rows: [[1]] } } }).html, /"columns":\["a"\]/)
+  assert.match(buildPage(view, undefined, { run, data: {} }).html, /"loading":true/)
+  assert.match(buildPage(view, undefined, { run, data: { 1: { error: 'boom' } } }).html, /boom/)
+})
+
+test('buildPage version is a content hash and diff runs once', () => {
+  const view = { terminal: 't1', pane: 'p', title: 't', cwd: '/', blocks: [{ type: 'table', command: 'x' }, { type: 'diff', repo: '/r' }] }
+  let runs = 0
+  const run = () => { runs++; return 'P' }
+  const data = (v) => ({ 0: { columns: ['a'], rows: [[v]] } })
+  const a = buildPage(view, undefined, { run, data: data(1) })
+  assert.equal(runs, 1)
+  assert.match(a.version, /^[0-9a-f]{12}$/)
+  assert.ok(a.html.includes(`window.__seen="${a.version}"`))
+  assert.equal(buildPage(view, undefined, { run, data: data(1) }).version, a.version)
+  assert.notEqual(buildPage(view, undefined, { run, data: data(2) }).version, a.version)
 })
 
 test('buildPage survives a failing diff', () => {
   const view = { terminal: 't1', pane: 'p', title: 't', cwd: '/', blocks: [{ type: 'diff', repo: '/r' }] }
-  assert.match(buildPage(view, undefined, 'v', { run: () => { throw new Error('nogit') }, data: {} }), /nogit/)
+  assert.match(buildPage(view, undefined, { run: () => { throw new Error('nogit') }, data: {} }).html, /nogit/)
 })
 
 test('due ignores diff blocks', () => {
@@ -133,6 +146,53 @@ test('open closes a stale page pane when the view has no page blocks', () => {
   assert.equal(r.status, 0, r.stderr)
   assert.match(t.calls(), /do pane\.close --pane p9/)
   assert.equal(JSON.parse(readFileSync(join(t.dir, 't1-chk.json'), 'utf8')).panes.page, undefined)
+})
+
+test('plain turns control characters into spaces', () => assert.equal(plain('a\u001b[31mb\tc\nd'), 'a [31mb c\nd'))
+
+test('open leaves an unchanged page alone and rewrites a changed one', () => {
+  const t = rig('echo \'{"pane":"p2","terminal":"t2"}\'')
+  t.theme()
+  const html = join(t.dir, 't1-chk.html')
+  const vjs = join(t.dir, 't1-chk.v.js')
+  open(stats, t.env)
+  const v1 = readFileSync(vjs, 'utf8')
+  const body = readFileSync(html, 'utf8')
+  utimesSync(html, 1000, 1000)
+  utimesSync(vjs, 1000, 1000)
+  open(stats, t.env)
+  assert.equal(statSync(html).mtimeMs, 1000000)
+  assert.equal(statSync(vjs).mtimeMs, 1000000)
+  assert.equal(readFileSync(html, 'utf8'), body)
+  assert.equal(readFileSync(vjs, 'utf8'), v1)
+  open({ ...stats, blocks: [{ type: 'stats', items: [{ label: 'A', value: 2 }] }] }, t.env)
+  assert.notEqual(readFileSync(vjs, 'utf8'), v1)
+})
+
+test('open does not close a pane whose terminal id was reused', () => {
+  const t = rig('echo \'{"pane":"p2","terminal":"t2"}\'')
+  t.theme()
+  writeFileSync(join(t.dir, 't1-chk.json'), JSON.stringify({ panes: { page: { pane: 'pX', terminal: 't9' } } }))
+  const r = open(stats, t.env)
+  assert.equal(r.status, 0, r.stderr)
+  assert.doesNotMatch(t.calls(), /pane\.close/)
+  assert.equal(t.calls().match(/do pane\.split/g).length, 1)
+})
+
+test('open removes old question snapshots and keeps fresh ones', () => {
+  const t = rig('echo \'{"pane":"p2","terminal":"t2"}\'')
+  t.theme()
+  const old = join(t.dir, 't1-chk.ask-1-0.json')
+  const fresh = join(t.dir, 't1-chk.ask-2-0.json')
+  const other = join(t.dir, 't1-other.ask-1-0.json')
+  for (const f of [old, fresh, other]) writeFileSync(f, '{}')
+  const day = Date.now() / 1000 - 25 * 3600
+  utimesSync(old, day, day)
+  utimesSync(other, day, day)
+  open(stats, t.env)
+  assert.equal(existsSync(old), false)
+  assert.equal(existsSync(fresh), true)
+  assert.equal(existsSync(other), true)
 })
 
 test('pickerRows and pickedFrom', () => {

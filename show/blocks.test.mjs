@@ -16,6 +16,13 @@ test("type lists", () => {
   assert.deepEqual(TYPES, [...PAGE, "log", "choice", "confirm"])
 })
 
+test("command is only for table, chart and log blocks", () => {
+  for (const b of [{ type: "markdown", text: "x" }, { type: "stats", items: [] }, { type: "confirm", summary: "s" }]) {
+    for (const command of ["echo hi", "", null, 1]) badBlock({ ...b, command }, "/blocks/0/command")
+  }
+  assert.equal(specError(view({ type: "markdown", text: "x", command: "echo hi" })), "at /blocks/0/command: only table, chart and log blocks take a command")
+})
+
 test("valid view", () => {
   assert.equal(specError({ pane: "a", title: "T", blocks: [{ type: "markdown", text: "hi" }] }), undefined)
 })

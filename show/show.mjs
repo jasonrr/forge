@@ -4,7 +4,8 @@
 //   log <stem> <n>  a log pane's program
 //   pick <file>     a floating window's program: asks the choice or confirm block in one snapshot file and sends the answer to the session
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync, renameSync, mkdirSync, rmdirSync, rmSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { readFileSync, writeFileSync, renameSync, mkdirSync, rmdirSync, rmSync, statSync, readdirSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -13,6 +14,7 @@ import { PAGE, specError, rowsFrom, answerText } from './blocks.mjs'
 import { palette, pageBlocks, pageHtml } from './page.mjs'
 
 const SELF = fileURLToPath(import.meta.url)
+// FORGE_SHOW_DIR is for tests only: the helper mod always uses ~/.cache/forge/show.
 const DIR = () => process.env.FORGE_SHOW_DIR || join(homedir(), '.cache/forge/show')
 const path = (name) => join(DIR(), name)
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
@@ -30,9 +32,10 @@ export const stemOf = (terminal, pane) => terminal.toLowerCase().replace(/[^a-z0
 export const shq = (text) => "'" + text.replace(/'/g, "'\\''") + "'"
 export const pickerRows = (block) => block.options.map((o, i) => `${i}\t${o.label.replace(/[\t\r\n]/g, ' ')}`)
 export const pickedFrom = (block, stdout) => block.options[Number.parseInt(stdout, 10)]
+export const plain = (text) => String(text).replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, ' ')
 export const pickerHeader = (view, block) => {
   const text = block.type === 'confirm' ? block.summary + (typeof block.consequence === 'string' && block.consequence ? '\n\n' + block.consequence : '') : (block.prompt ?? view.title)
-  return String(text).replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, ' ').slice(0, 1000)
+  return plain(text).slice(0, 1000)
 }
 export const diffCommand = (block) => 'git -C ' + shq(block.repo) + ' diff --no-color --no-ext-diff ' + shq(block.base ?? 'HEAD') + ' --'
 
@@ -52,7 +55,8 @@ function put(file, text) {
   renameSync(tmp, file)
 }
 
-export function buildPage(view, themeFile, version, { run, data }) {
+// The version is a hash of the page itself, so an unchanged page keeps its version and is not reloaded.
+export function buildPage(view, themeFile, { run, data }) {
   const pageOnly = []
   const extra = new Map()
   view.blocks.forEach((b, n) => {
@@ -62,7 +66,10 @@ export function buildPage(view, themeFile, version, { run, data }) {
     } else if (b.command && data[n]) extra.set(pageOnly.length, data[n])
     pageOnly.push(b)
   })
-  return pageHtml({ stem: stemOf(view.terminal, view.pane), title: view.title, blocks: pageBlocks(pageOnly, extra), palette: palette(themeFile), version })
+  const blocks = pageBlocks(pageOnly, extra)
+  const render = (version) => pageHtml({ stem: stemOf(view.terminal, view.pane), title: view.title, blocks, palette: palette(themeFile), version })
+  const version = createHash('sha1').update(render('')).digest('hex').slice(0, 12)
+  return { version, html: render(version) }
 }
 
 export function due(view, lastRun, now) {
@@ -76,9 +83,11 @@ export function due(view, lastRun, now) {
 function writePage(stem, view, data) {
   let themeFile
   try { themeFile = read(path('theme.json')) } catch { /* the page falls back to the default palette */ }
-  const version = String(Date.now())
-  put(path(stem + '.html'), buildPage(view, themeFile, version, { run: runShell, data }))
-  put(path(stem + '.v.js'), 'window.__v=' + JSON.stringify(version))
+  const { version, html } = buildPage(view, themeFile, { run: runShell, data })
+  const stamp = 'window.__v=' + JSON.stringify(version)
+  try { if (existsSync(path(stem + '.html')) && readFileSync(path(stem + '.v.js'), 'utf8') === stamp) return } catch { /* no version file yet */ }
+  put(path(stem + '.html'), html)
+  put(path(stem + '.v.js'), stamp)
 }
 
 function themeKey() {
@@ -141,10 +150,15 @@ function open(view) {
 
   const stem = stemOf(terminal, view.pane)
   const cwd = view.cwd ?? process.cwd()
-  const alive = (p) => p && terminals.some((t) => t.terminal === p.terminal)
+  const alive = (p) => p && terminals.some((t) => t.terminal === p.terminal && t.pane === p.pane)
   let panes = {}
   try { panes = read(path(stem + '.json')).panes ?? {} } catch { /* first show of this pane */ }
   mkdirSync(DIR(), { recursive: true })
+  // A person who closes a question window instead of answering leaves its snapshot behind.
+  for (const name of readdirSync(DIR())) {
+    if (!name.startsWith(stem + '.ask-') || !name.endsWith('.json')) continue
+    try { if (Date.now() - statSync(path(name)).mtimeMs > 24 * 3600 * 1000) rmSync(path(name)) } catch { /* gone already */ }
+  }
   const stored = { ...view, terminal, cwd, panes, stamp: Date.now() }
   put(path(stem + '.json'), JSON.stringify(stored))
 
@@ -164,6 +178,7 @@ function open(view) {
     }
     const acked = current && !floats.length ? true : askHelper(key, !current, floats)
     floatsOpen = acked || !floats.length
+    // A picker that died after being floated means the window never showed: hc get fails if its terminal is gone.
     for (const f of floats) sh(['hc', 'get', f.terminal], { stdio: 'ignore' })
   } catch { floatsOpen = false }
   let note = ''
@@ -257,7 +272,7 @@ async function choose(block, header, preview) {
   const r = spawnSync('fzf', args, { input: pickerRows(block).join('\n'), stdio: ['pipe', 'pipe', 'inherit'], encoding: 'utf8', env: env() })
   if (!r.error) return r.status === 0 ? pickedFrom(block, r.stdout) : undefined
   console.log(header)
-  block.options.forEach((o, i) => console.log(`${i + 1}) ${o.label}`))
+  block.options.forEach((o, i) => console.log(`${i + 1}) ${plain(o.label)}`))
   const answer = (await enter()).trim()
   return /^\d+$/.test(answer) ? block.options[Number(answer) - 1] : undefined
 }

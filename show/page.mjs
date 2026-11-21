@@ -59,7 +59,7 @@ export function pageBlocks(blocks, extra) {
     else if (b.type === "image" && typeof b.path === "string") out = { ...b, url: fileUrl(b.path) }
     else if (b.type === "compare") out = { ...b, before: picture(b.before), after: picture(b.after) }
     if (extra.has(n)) out = { ...out, ...extra.get(n) }
-    return out.command && out.rows === undefined && !out.error ? { ...out, loading: true } : out
+    return (out.type === "table" || out.type === "chart") && out.command && out.rows === undefined && !out.error ? { ...out, loading: true } : out
   })
 }
 
@@ -99,7 +99,7 @@ img { max-width: 100%; border-radius: 6px; }
 .compare figcaption { text-transform: uppercase; letter-spacing: .06em; margin: 0 0 6px; }
 @media (max-width: 420px) { .compare { grid-template-columns: 1fr; } }
 .mermaid { background: var(--panel); border-radius: 8px; padding: 16px; }
-.zoom { position: relative; overflow: hidden; max-height: calc(100vh - 180px); background: var(--panel); border-radius: 8px; } .zoom .mermaid { margin: 0; cursor: grab; }
+.zoom { position: relative; overflow: hidden; max-height: calc(100vh - 180px); background: var(--panel); border-radius: 8px; } .zoom .mermaid { margin: 0; cursor: grab; overflow: visible; }
 .zbar { position: absolute; top: 8px; right: 8px; z-index: 1; display: flex; gap: 4px; }
 .zbar button { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 2px 9px; font: inherit; cursor: pointer; }
 .d2h-wrapper { --d2h-bg-color: var(--bg); }
@@ -216,7 +216,7 @@ for (const b of spec.blocks) {
     const fitBox = () => {
       svg.style.transform = ''
       const s = svg.getBoundingClientRect(), b = box.getBoundingClientRect()
-      k = Math.min(1, b.width / s.width, (b.height - 2 * (s.top - b.top) - 8) / s.height) || 1
+      k = Math.max(0.05, Math.min(1, b.width / s.width, (b.height - (s.top - b.top) - 8) / s.height)) || 1
       x = (b.width - s.width * k) / 2; y = 0; apply()
     }
     const [minus, plus, fit] = box.querySelectorAll('.zbar button')
@@ -225,6 +225,7 @@ for (const b of spec.blocks) {
     box.addEventListener('pointerdown', (e) => { if (e.target.closest('.zbar')) return; drag = { px: e.clientX - x, py: e.clientY - y }; box.setPointerCapture(e.pointerId) })
     box.addEventListener('pointermove', (e) => { if (!drag) return; x = e.clientX - drag.px; y = e.clientY - drag.py; apply() })
     box.addEventListener('pointerup', () => { drag = null })
+    box.addEventListener('pointercancel', () => { drag = null })
     fitBox(); window.addEventListener('resize', fitBox)
   }
 })()

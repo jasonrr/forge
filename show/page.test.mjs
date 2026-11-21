@@ -41,6 +41,7 @@ test("pageBlocks urls, extras and loading", () => {
   assert.equal(pageBlocks([{ type: "diff", repo: "/r" }], new Map([[0, { patch: "P" }]]))[0].patch, "P")
   assert.equal(pageBlocks([{ type: "diff", repo: "/r" }], new Map([[0, { error: "E" }]]))[0].error, "E")
   assert.equal(pageBlocks([{ type: "table", command: "x" }], new Map())[0].loading, true)
+  assert.equal(pageBlocks([{ type: "log", command: "x" }], new Map())[0].loading, undefined)
 })
 
 test("pageHtml escapes and embeds", () => {
@@ -85,6 +86,13 @@ test("page script gives charts and mermaid a font stack", () => {
   assert.ok(html.includes("BlinkMacSystemFont, sans-serif'"))
   assert.ok(html.includes("fontFamily: FONT"))
   assert.ok(html.includes("Chart.defaults.font.family = FONT"))
+})
+
+test("page zoom: one padding, visible overflow, pointercancel", () => {
+  const html = gen()
+  assert.ok(html.includes("k = Math.max(0.05, Math.min(1, b.width / s.width, (b.height - (s.top - b.top) - 8) / s.height)) || 1"))
+  assert.ok(html.includes(".zoom .mermaid { margin: 0; cursor: grab; overflow: visible; }"))
+  assert.ok(html.includes("box.addEventListener('pointercancel'"))
 })
 
 test("diff2html inherits the page colours", () => {
