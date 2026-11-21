@@ -67,3 +67,9 @@
 ## track-pane-shared-pin (2026-11-20)
 
 - A mod copy's `localStorage` is one store file per mod + props (`data/<mod>/store-<hash>.json`), not per pane, whatever Herdr's docs say → a value "remembered per pane" there is shared by every pane opened with the same props (every ⌘⇧J track pane read one pin, left behind by a test worktree in another session); verify "per copy" storage with two live copies before relying on it, and keep per-pane state in memory or in props.
+
+## forge-show (PR #53, 2026-11-21)
+
+- A mod's `writeTextFile(path, text, expected)` needs the file's current content as `expected`; with two arguments it creates a file once and then rejects every overwrite, silently if the call sits in a `try` → a helper that reads then writes, and a live check that runs the write twice, not once.
+- `herdr-app check` runs a mod's `init()` for real, writes and overlays included → any mod that acts on files at start must return early when `checking()` is true, or `scripts/publish.sh` triggers it.
+- `node --test <dir>/` fails on Node 22 (it reads the argument as a file) → write the glob, `node --test dir/*.test.mjs`.

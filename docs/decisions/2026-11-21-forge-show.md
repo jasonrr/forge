@@ -67,3 +67,4 @@ New kind of file for forge: a hooks module (forge is skills + one hook + one pi 
 ## Deviations
 
 - T1 commit 2d5c576, c84085e — deviation: one review fix round (null view, command output shape check, empty actor label, carriage returns, numeric answer values); duplicate actor lines in a sequence left as is (Mermaid accepts them) — parked: none
+- T3 commit 3d6079d, 08219e5 — deviation: the plan's mod code called `writeTextFile` with two arguments, which cannot overwrite an existing file, and acted under `herdr-app check`; fixed in a second commit (a `put` helper passing the current content, and a `checking()` guard). Two p3 review notes left as is: one malformed float entry stops later floats (the script writes them with fixed sizes), and the ack write is not retried (requests are serialised by the script's lock) — parked: none
