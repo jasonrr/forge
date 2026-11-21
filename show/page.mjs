@@ -216,7 +216,7 @@ for (const b of spec.blocks) {
     const fitBox = () => {
       svg.style.transform = ''
       const s = svg.getBoundingClientRect(), b = box.getBoundingClientRect()
-      k = Math.min(1, b.width / s.width, b.height / s.height) || 1
+      k = Math.min(1, b.width / s.width, (b.height - 2 * (s.top - b.top) - 8) / s.height) || 1
       x = (b.width - s.width * k) / 2; y = 0; apply()
     }
     const [minus, plus, fit] = box.querySelectorAll('.zbar button')
@@ -225,7 +225,7 @@ for (const b of spec.blocks) {
     box.addEventListener('pointerdown', (e) => { if (e.target.closest('.zbar')) return; drag = { px: e.clientX - x, py: e.clientY - y }; box.setPointerCapture(e.pointerId) })
     box.addEventListener('pointermove', (e) => { if (!drag) return; x = e.clientX - drag.px; y = e.clientY - drag.py; apply() })
     box.addEventListener('pointerup', () => { drag = null })
-    fitBox()
+    fitBox(); window.addEventListener('resize', fitBox)
   }
 })()
 window.__seen=${js(version)}
