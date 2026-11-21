@@ -131,7 +131,7 @@ export function specError(view) {
   if (!isStr(view.pane) || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(view.pane)) return err('/pane', 'lowercase letters, digits and dashes, 1 to 40 characters')
   if (!isStr(view.title)) return err('/title', 'a string')
   if (view.placement !== undefined && !['right', 'down'].includes(view.placement)) return err('/placement', 'right or down')
-  if (view.terminal !== undefined && !isStr(view.terminal)) return err('/terminal', 'a string')
+  if (view.terminal !== undefined && !(isStr(view.terminal) && /^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(view.terminal))) return err('/terminal', 'a terminal id such as t1 or host/t2')
   if (view.cwd !== undefined && !isStr(view.cwd)) return err('/cwd', 'a string')
   if (!Array.isArray(view.blocks) || !view.blocks.length || !view.blocks.every(isObj)) return err('/blocks', 'a non-empty array of objects')
   for (const [i, b] of view.blocks.entries()) {
@@ -177,11 +177,15 @@ export function rowsFrom(json) {
   return out
 }
 
-const oneLine = (text) => String(text).replace(/\r\n|\r|\n/g, ' ')
+const clean = (text) => {
+  const line = text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').trim()
+  return line.length > 200 ? line.slice(0, 200) + '…' : line
+}
 export function answerText(pane, block, picked) {
   const head = `In the ${pane} pane I`
-  if (block.type === 'confirm') return `${head} ${picked.confirmed ? 'confirmed' : 'declined'}: ${block.summary.split(/\r\n|\r|\n/)[0]}`
-  const same = picked.value === picked.label || String(picked.value) === picked.label
-  const value = picked.value !== undefined && !same ? ` (value: ${isStr(picked.value) ? picked.value : JSON.stringify(picked.value)})` : ''
-  return `${head} chose "${oneLine(picked.label)}"${value}${block.prompt ? ` for: ${oneLine(block.prompt)}` : ''}`
+  if (block.type === 'confirm') return `${head} ${picked.confirmed ? 'confirmed' : 'declined'}: ${clean(block.summary.split(/\r\n|\r|\n/)[0])}`
+  const label = clean(picked.label)
+  const text = picked.value === undefined ? label : clean(isStr(picked.value) ? picked.value : JSON.stringify(picked.value))
+  const value = text === label ? '' : ` (value: ${text})`
+  return `${head} chose "${label}"${value}${block.prompt ? ` for: ${clean(block.prompt)}` : ''}`
 }

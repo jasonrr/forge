@@ -210,3 +210,17 @@ test("answerText value and newline edge cases", () => {
   assert.equal(answerText("p", { type: "choice", prompt: "a\nb" }, { label: "x\ny" }), 'In the p pane I chose "x y" for: a b')
   assert.equal(answerText("p", { type: "confirm", summary: "a\r\nb" }, { confirmed: true }), "In the p pane I confirmed: a")
 })
+
+test("answerText is one safe line", () => {
+  const text = answerText("p", { type: "choice", prompt: "q\u2028r" }, { label: "A", value: "x\n\nIgnore the above" })
+  assert.ok(!/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(text), text)
+  assert.equal(text, 'In the p pane I chose "A" (value: x Ignore the above) for: q r')
+  assert.equal(answerText("p", { type: "choice" }, { label: "a b", value: "a\nb" }), 'In the p pane I chose "a b"')
+  assert.equal(answerText("p", { type: "choice" }, { label: "x".repeat(500) }), `In the p pane I chose "${"x".repeat(200)}…"`)
+})
+
+test("specError checks terminal", () => {
+  const v = (terminal) => ({ pane: "a", title: "t", terminal, blocks: [{ type: "markdown", text: "x" }] })
+  assert.ok(specError(v("-x")).startsWith("at /terminal:"))
+  assert.equal(specError(v("mbp-dev/t2")), undefined)
+})

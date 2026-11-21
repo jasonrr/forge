@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { stemOf, plan, diffCommand, buildPage, due, pickerRows, pickedFrom } from './show.mjs'
@@ -154,8 +154,34 @@ test('open asks a choice in a floating window', () => {
   const req = JSON.parse(readFileSync(join(t.dir, 'request.json'), 'utf8'))
   assert.equal(req.floats[0].terminal, 't9')
   assert.equal(req.floats[0].key, 'show-t9')
-  assert.match(t.calls(), /hc run --bg --json --no-notify --rm node \S+show\.mjs pick t1-ask 0/)
+  assert.match(t.calls(), /hc run --bg --json --no-notify --rm node \S+show\.mjs pick \/\S+t1-ask\.ask-\d+-0\.json\n/)
   assert.equal(t.calls().match(/mod\.open/g).length, 1)
+})
+
+test('open writes a snapshot per question', () => {
+  const t = rig('if [ "$2" = mod.open ]; then ack; fi')
+  t.theme()
+  const view = { ...choice, terminal: 't9', blocks: [{ type: 'log', command: 'x' }, choice.blocks[0]] }
+  open(view, t.env)
+  const stored = JSON.parse(readFileSync(join(t.dir, 't9-ask.json'), 'utf8'))
+  const file = readdirSync(t.dir).find((f) => f.startsWith('t9-ask.ask-'))
+  assert.equal(file, `t9-ask.ask-${stored.stamp}-1.json`)
+  assert.deepEqual(JSON.parse(readFileSync(join(t.dir, file), 'utf8')), { pane: 'ask', title: 't', terminal: 't9', block: view.blocks[1] })
+})
+
+test('pick reads only its snapshot and deletes it; preview ignores bad indexes', () => {
+  const dir = tmp()
+  const bin = tmp()
+  writeFileSync(join(bin, 'fzf'), '#!/bin/sh\nexit 1\n')
+  chmodSync(join(bin, 'fzf'), 0o755)
+  const file = join(dir, 'x.ask-1-0.json')
+  const snap = { pane: 'p', title: 't', terminal: 't1', block: { type: 'choice', options: [{ label: 'A', preview: 'pa' }, { label: 'B' }] } }
+  const run = (...args) => spawnSync('node', [SHOW, ...args], { encoding: 'utf8', env: { ...process.env, FORGE_SHOW_DIR: tmp(), FORGE_SHOW_PATH_FIRST: bin } })
+  writeFileSync(file, JSON.stringify(snap))
+  assert.equal(run('preview', file, '0').stdout, 'pa\n')
+  for (const i of ['1', '9', 'x', '-1', 'length']) assert.equal(run('preview', file, i).stdout, '')
+  assert.equal(run('pick', file).status, 0)
+  assert.equal(existsSync(file), false)
 })
 
 test('open denies and kills the picker when the float does not open', () => {
@@ -164,4 +190,16 @@ test('open denies and kills the picker when the float does not open', () => {
   const r = open(choice, { ...t.env, FORGE_SHOW_ACK_MS: '300' })
   assert.match(JSON.parse(r.stdout).deny, /^forge show could not open the question window/)
   assert.match(t.calls(), /hc kill t9/)
+})
+
+test('open keeps the log panes when the question window fails', () => {
+  const t = rig('if [ "$2" = mod.open ]; then true; else echo \'{"pane":"p2","terminal":"t2"}\'; fi')
+  t.theme()
+  const view = { pane: 'ask', title: 't', blocks: [choice.blocks[0], logOnly.blocks[0]] }
+  const r = open(view, { ...t.env, FORGE_SHOW_ACK_MS: '300' })
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(JSON.parse(r.stdout).result, 'Opened the ask pane beside this session. The question window could not be opened (is the forge-show helper mod installed? run scripts/install-herdr-mod.sh).')
+  assert.match(t.calls(), /hc kill t9/)
+  assert.match(t.calls(), /do pane\.split/)
+  assert.deepEqual(readdirSync(t.dir).filter((f) => f.includes('.ask-')), [])
 })

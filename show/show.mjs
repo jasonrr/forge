@@ -2,11 +2,11 @@
 //   open            reads one JSON view on stdin and prints one JSON line, {"result"} or {"deny"}
 //   serve <stem>    the page pane's program: shows the page and keeps command blocks fresh
 //   log <stem> <n>  a log pane's program
-//   pick <stem> <n> a floating window's program: asks a choice or confirm block and sends the answer to the session
+//   pick <file>     a floating window's program: asks the choice or confirm block in one snapshot file and sends the answer to the session
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync, renameSync, mkdirSync, rmdirSync, statSync } from 'node:fs'
+import { readFileSync, writeFileSync, renameSync, mkdirSync, rmdirSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createInterface } from 'node:readline'
 import { PAGE, specError, rowsFrom, answerText } from './blocks.mjs'
@@ -20,7 +20,7 @@ const read = (file) => JSON.parse(readFileSync(file, 'utf8'))
 const first200 = (e) => String(e?.message ?? e).slice(0, 200)
 
 const env = () => ({ ...process.env, PATH: [process.env.FORGE_SHOW_PATH_FIRST, `${homedir()}/.local/bin`, '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH].filter(Boolean).join(':') })
-const sh = (argv, opts) => execFileSync(argv[0], argv.slice(1), { encoding: 'utf8', env: env(), timeout: 10000, ...opts })
+const sh = (argv, opts) => execFileSync(argv[0], argv.slice(1), { encoding: 'utf8', env: env(), timeout: 5000, ...opts })
 
 const runShell = (command, cwd) => sh(['sh', '-c', command], { cwd, timeout: 20000, maxBuffer: 8 << 20 })
 const herdr = (...args) => JSON.parse(sh(['herdr-app', 'do', ...args]))
@@ -92,10 +92,10 @@ function themeKey() {
 
 function takeLock() {
   const lock = path('lock')
-  for (const end = Date.now() + 8000; ; sleep(100)) {
+  for (const end = Date.now() + 10000; ; sleep(100)) {
     try { mkdirSync(lock); return lock } catch (e) {
       if (e.code !== 'EEXIST' || Date.now() > end) throw e
-      try { if (Date.now() - statSync(lock).mtimeMs > 6000) rmdirSync(lock) } catch { /* another process took it */ }
+      try { if (Date.now() - statSync(lock).mtimeMs > 8000) rmdirSync(lock) } catch { /* another process took it */ }
     }
   }
 }
@@ -108,7 +108,7 @@ function askHelper(key, theme, floats) {
   try {
     const id = process.pid + '-' + Date.now()
     put(path('request.json'), JSON.stringify({ id, key, theme, floats }))
-    try { sh(['herdr-app', 'do', 'mod.open', '--name', 'forge-show']) } catch { return false }
+    try { sh(['herdr-app', 'do', 'mod.open', '--name', 'forge-show'], { timeout: 3000 }) } catch { return false }
     for (const end = Date.now() + (Number(process.env.FORGE_SHOW_ACK_MS) || 3000); Date.now() < end; sleep(100)) {
       try { if (read(path('ack.json')).id === id) return true } catch { /* not written yet */ }
     }
@@ -148,19 +148,26 @@ function open(view) {
   let current = false
   try { current = read(path('theme.json')).key === key } catch { /* missing */ }
   const floats = []
+  const snapshots = []
   let floatsOpen
   try {
     for (const n of asks) {
-      const { address } = JSON.parse(sh(['hc', 'run', '--bg', '--json', '--no-notify', '--rm', 'node', SELF, 'pick', stem, String(n)]))
+      const file = resolve(path(`${stem}.ask-${stored.stamp}-${n}.json`))
+      put(file, JSON.stringify({ pane: view.pane, title: view.title, terminal, block: view.blocks[n] }))
+      snapshots.push(file)
+      const { address } = JSON.parse(sh(['hc', 'run', '--bg', '--json', '--no-notify', '--rm', 'node', SELF, 'pick', file]))
       floats.push({ terminal: address, key: 'show-' + address, width: 640, height: 320 })
     }
     const acked = current && !floats.length ? true : askHelper(key, !current, floats)
     floatsOpen = acked || !floats.length
     for (const f of floats) sh(['hc', 'get', f.terminal], { stdio: 'ignore' })
   } catch { floatsOpen = false }
+  let note = ''
   if (!floatsOpen) {
     for (const f of floats) try { sh(['hc', 'kill', f.terminal]) } catch { /* it may be gone already */ }
-    return { deny: 'forge show could not open the question window (is the forge-show helper mod installed? run scripts/install-herdr-mod.sh).' }
+    for (const file of snapshots) rmSync(file, { force: true })
+    if (!page.length && !logs.length) return { deny: 'forge show could not open the question window (is the forge-show helper mod installed? run scripts/install-herdr-mod.sh).' }
+    note = ' The question window could not be opened (is the forge-show helper mod installed? run scripts/install-herdr-mod.sh).'
   }
 
   let opened = false
@@ -190,7 +197,7 @@ function open(view) {
   }
   if (!page.length && !logs.length) return { result: "Asked in a floating window; the answer arrives as the person's next message. They click the window first." }
   try { herdr('pane.focus', '--terminal', terminal) } catch { /* focus is a nicety */ }
-  return { result: (opened ? `Opened the ${view.pane} pane beside this session.` : `Updated the ${view.pane} pane.`) + (asks.length ? ' Also asked a question in a floating window.' : '') }
+  return { result: (opened ? `Opened the ${view.pane} pane beside this session.` : `Updated the ${view.pane} pane.`) + (asks.length && floatsOpen ? ' Also asked a question in a floating window.' : '') + note }
 }
 
 async function serve(stem) {
@@ -247,22 +254,25 @@ async function choose(block, header, preview) {
   if (!r.error) return r.status === 0 ? pickedFrom(block, r.stdout) : undefined
   console.log(header)
   block.options.forEach((o, i) => console.log(`${i + 1}) ${o.label}`))
-  return block.options[Number(await enter()) - 1]
+  const answer = (await enter()).trim()
+  return /^\d+$/.test(answer) ? block.options[Number(answer) - 1] : undefined
 }
 
-async function pick(stem, n) {
-  const view = read(path(stem + '.json'))
-  const block = view.blocks[n]
-  const confirm = block.type === 'confirm'
-  if (confirm) console.log(block.summary + (block.consequence ? '\n' + block.consequence : ''))
-  const options = confirm ? [{ label: block.confirm_label ?? 'Confirm' }, { label: 'Cancel' }] : block.options
-  const preview = !confirm && options.some((o) => o.preview) && 'node ' + shq(SELF) + ' preview ' + shq(stem) + ' ' + n + ' {1}'
-  const chosen = await choose({ options }, block.prompt ?? view.title, preview)
-  if (!chosen) return
-  try { sh(['hc', 'send', view.terminal, answerText(view.pane, block, confirm ? { confirmed: chosen === options[0] } : chosen)]) } catch (e) {
-    console.log(first200(e))
-    await enter()
-  }
+async function pick(file) {
+  const view = read(file)
+  try {
+    const block = view.block
+    const confirm = block.type === 'confirm'
+    if (confirm) console.log(block.summary + (block.consequence ? '\n' + block.consequence : ''))
+    const options = confirm ? [{ label: block.confirm_label ?? 'Confirm' }, { label: 'Cancel' }] : block.options
+    const preview = !confirm && options.some((o) => o.preview) && 'node ' + shq(SELF) + ' preview ' + shq(file) + ' {1}'
+    const chosen = await choose({ options }, block.prompt ?? view.title, preview)
+    if (!chosen) return
+    try { sh(['hc', 'send', view.terminal, answerText(view.pane, block, confirm ? { confirmed: chosen === options[0] } : chosen)]) } catch (e) {
+      console.log(first200(e))
+      await enter()
+    }
+  } finally { rmSync(file, { force: true }) }
 }
 
 async function main([cmd, ...args]) {
@@ -273,8 +283,11 @@ async function main([cmd, ...args]) {
     console.log(JSON.stringify(open(view)))
   } else if (cmd === 'serve') await serve(args[0])
   else if (cmd === 'log') await log(args[0], Number(args[1]))
-  else if (cmd === 'pick') await pick(args[0], Number(args[1]))
-  else if (cmd === 'preview') console.log(read(path(args[0] + '.json')).blocks[args[1]].options[args[2]].preview ?? '')
+  else if (cmd === 'pick') await pick(args[0])
+  else if (cmd === 'preview') {
+    const options = read(args[0]).block.options
+    if (/^\d+$/.test(args[1]) && options[args[1]]?.preview) console.log(options[args[1]].preview)
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
