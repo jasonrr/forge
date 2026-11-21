@@ -67,3 +67,15 @@
 ## track-pane-shared-pin (2026-11-20)
 
 - A mod copy's `localStorage` is one store file per mod + props (`data/<mod>/store-<hash>.json`), not per pane, whatever Herdr's docs say → a value "remembered per pane" there is shared by every pane opened with the same props (every ⌘⇧J track pane read one pin, left behind by a test worktree in another session); verify "per copy" storage with two live copies before relying on it, and keep per-pane state in memory or in props.
+
+## forge-show (PR #53, 2026-11-21)
+
+- A mod's `writeTextFile(path, text, expected)` needs the file's current content as `expected`; with two arguments it creates a file once and then rejects every overwrite, silently if the call sits in a `try` → a helper that reads then writes, and a live check that runs the write twice, not once.
+- `herdr-app check` runs a mod's `init()` for real, writes and overlays included → any mod that acts on files at start must return early when `checking()` is true, or `scripts/publish.sh` triggers it.
+- `node --test <dir>/` fails on Node 22 (it reads the argument as a file) → write the glob, `node --test dir/*.test.mjs`.
+- A hooks-module tool answered from a `tool.call` hook never reaches `tool.check`, so its permission guard is dead code → serve a registered tool from `tool.run`, and prove the guard with a run that must be refused (`claude --plugin-dir . --debug-file <f> -p …`, then grep the log for `tool.check`).
+- fzf's full-screen interface covers anything printed before it starts → put the question in `--header`; check a picker with a screenshot, not from its exit code.
+- A page pane's `serve` process keeps the code it started with, so a page rewritten by a newer script is overwritten by the old one on the next tick → when testing a page change live, close the pane and open it again; after a release, panes already open show old rendering until reopened.
+- "Reloads only when content changed" was in the design but the version was a timestamp, and no test held it → when a design states a property, the plan needs a test that names it.
+- The same rule written in four places (which blocks carry a command: hook, validator, refresh loop, page) had already drifted → validate once at the boundary and reject what the rest does not handle.
+- A release-time check on a file shared with another tool (Codex reads `hooks/hooks.json`) cannot be run from a feature branch → list it in the PR as a step before the release is relied on, and say it is untested.
