@@ -174,3 +174,36 @@ test("answerText", () => {
   assert.equal(answerText("p", { type: "confirm", summary: "Delete it?\nmore" }, { confirmed: true }), "In the p pane I confirmed: Delete it?")
   assert.equal(answerText("p", { type: "confirm", summary: "Delete it?\nmore" }, { confirmed: false }), "In the p pane I declined: Delete it?")
 })
+
+test("specError tolerates a non-object view", () => {
+  for (const v of [null, undefined, 3, "x", []]) {
+    const e = specError(v)
+    assert.equal(typeof e, "string")
+    assert.ok(e.startsWith("at /:"), e)
+  }
+})
+
+test("rowsFrom checks shape", () => {
+  const throwsCmd = (input) => assert.throws(() => rowsFrom(input), (e) => e instanceof Error && e.message.startsWith("command output:"))
+  throwsCmd({ columns: [1], rows: [5] })
+  throwsCmd({ columns: ["a"], rows: [[1, 2]] })
+  throwsCmd({ columns: [], rows: [] })
+  throwsCmd([])
+  assert.deepEqual(rowsFrom([{ a: { n: 1 } }]), { columns: ["a"], rows: [['{"n":1}']] })
+})
+
+test("sequenceText empty label and carriage returns", () => {
+  assert.equal(
+    sequenceText({ actors: [{ id: "a", label: "" }], messages: [{ from: "a", to: "a", label: "x" }] }),
+    "sequenceDiagram\n  participant a0 as a\n  a0->>a0: x",
+  )
+  assert.equal(flowText({ nodes: [{ id: "a", label: "x\r\ny" }] }), 'flowchart TD\n  n0["x y"]')
+  assert.ok(!sequenceText({ actors: [{ id: "a", label: "p\rq" }], messages: [{ from: "a", to: "a", label: "m\r\nn" }] }).includes("\r"))
+})
+
+test("answerText value and newline edge cases", () => {
+  assert.equal(answerText("p", { type: "choice" }, { label: "5", value: 5 }), 'In the p pane I chose "5"')
+  assert.equal(answerText("p", { type: "choice" }, { label: "A", value: { a: 1 } }), 'In the p pane I chose "A" (value: {"a":1})')
+  assert.equal(answerText("p", { type: "choice", prompt: "a\nb" }, { label: "x\ny" }), 'In the p pane I chose "x y" for: a b')
+  assert.equal(answerText("p", { type: "confirm", summary: "a\r\nb" }, { confirmed: true }), "In the p pane I confirmed: a")
+})

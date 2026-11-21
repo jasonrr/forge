@@ -127,6 +127,7 @@ const CHECKS = {
 }
 
 export function specError(view) {
+  if (!isObj(view)) return err('/', 'an object')
   if (!isStr(view.pane) || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(view.pane)) return err('/pane', 'lowercase letters, digits and dashes, 1 to 40 characters')
   if (!isStr(view.title)) return err('/title', 'a string')
   if (view.placement !== undefined && !['right', 'down'].includes(view.placement)) return err('/placement', 'right or down')
@@ -139,7 +140,7 @@ export function specError(view) {
   }
 }
 
-const quoted = (text) => `"${text.replace(/"/g, '#quot;').replace(/\n/g, ' ')}"`
+const quoted = (text) => `"${text.replace(/"/g, '#quot;').replace(/\r\n|\r|\n/g, ' ')}"`
 export function flowText(block) {
   const shape = (kind, label) => (kind === 'round' ? `(${quoted(label)})` : kind === 'decision' ? `{${quoted(label)}}` : `[${quoted(label)}]`)
   const nodes = block.nodes.map((n, i) => `  n${i}${shape(n.kind, n.label)}`)
@@ -150,29 +151,35 @@ export function flowText(block) {
 export function sequenceText(block) {
   const names = new Map()
   const id = (name) => { if (!names.has(name)) names.set(name, `a${names.size}`); return names.get(name) }
-  const actors = (block.actors ?? []).map((a) => (typeof a === 'string' ? { id: a, label: a } : { id: a.id, label: a.label ?? a.id }))
-  const lines = actors.map((a) => `  participant ${id(a.id)} as ${a.label.replace(/[:;\n]/g, ' ')}`)
+  const actors = (block.actors ?? []).map((a) => (typeof a === 'string' ? { id: a, label: a } : { id: a.id, label: a.label || a.id }))
+  const lines = actors.map((a) => `  participant ${id(a.id)} as ${a.label.replace(/[:;\r\n]/g, ' ')}`)
   for (const m of block.messages) {
-    const text = String(m.label ?? m.note ?? '').replace(/[;\n]/g, ' ')
+    const text = String(m.label ?? m.note ?? '').replace(/[;\r\n]/g, ' ')
     if (m.note !== undefined) lines.push(`  Note over ${id(m.over)}: ${text}`)
     else lines.push(`  ${id(m.from)}${m.reply ? '-->>' : '->>'}${id(m.to)}: ${text || ' '}`)
   }
-  const late = [...names].filter(([name]) => !actors.some((a) => a.id === name)).map(([name, alias]) => `  participant ${alias} as ${name.replace(/[:;\n]/g, ' ')}`)
+  const late = [...names].filter(([name]) => !actors.some((a) => a.id === name)).map(([name, alias]) => `  participant ${alias} as ${name.replace(/[:;\r\n]/g, ' ')}`)
   return ['sequenceDiagram', ...late, ...lines].join('\n')
 }
 
 export function rowsFrom(json) {
-  if (isObj(json) && Array.isArray(json.columns) && Array.isArray(json.rows)) return json
-  if (Array.isArray(json) && json.every(isObj)) {
+  let out
+  if (isObj(json) && Array.isArray(json.columns) && Array.isArray(json.rows)) out = json
+  else if (Array.isArray(json) && json.every(isObj)) {
     const columns = [...new Set(json.flatMap(Object.keys))]
-    return { columns, rows: json.map((r) => columns.map((c) => r[c] ?? null)) }
-  }
-  throw new Error('command output: expected {columns, rows} or an array of objects')
+    const cell = (v) => (v === undefined ? null : isStr(v) || isNum(v) || typeof v === 'boolean' || v === null ? v : JSON.stringify(v))
+    out = { columns, rows: json.map((r) => columns.map((c) => cell(r[c]))) }
+  } else throw new Error('command output: expected {columns, rows} or an array of objects')
+  const e = tableError(out, '')
+  if (e) throw new Error(`command output: ${e}`)
+  return out
 }
 
+const oneLine = (text) => String(text).replace(/\r\n|\r|\n/g, ' ')
 export function answerText(pane, block, picked) {
   const head = `In the ${pane} pane I`
-  if (block.type === 'confirm') return `${head} ${picked.confirmed ? 'confirmed' : 'declined'}: ${block.summary.split('\n')[0]}`
-  const value = picked.value !== undefined && picked.value !== picked.label ? ` (value: ${picked.value})` : ''
-  return `${head} chose "${picked.label}"${value}${block.prompt ? ` for: ${block.prompt}` : ''}`
+  if (block.type === 'confirm') return `${head} ${picked.confirmed ? 'confirmed' : 'declined'}: ${block.summary.split(/\r\n|\r|\n/)[0]}`
+  const same = picked.value === picked.label || String(picked.value) === picked.label
+  const value = picked.value !== undefined && !same ? ` (value: ${isStr(picked.value) ? picked.value : JSON.stringify(picked.value)})` : ''
+  return `${head} chose "${oneLine(picked.label)}"${value}${block.prompt ? ` for: ${oneLine(block.prompt)}` : ''}`
 }
