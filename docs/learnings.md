@@ -73,3 +73,5 @@
 - A mod's `writeTextFile(path, text, expected)` needs the file's current content as `expected`; with two arguments it creates a file once and then rejects every overwrite, silently if the call sits in a `try` → a helper that reads then writes, and a live check that runs the write twice, not once.
 - `herdr-app check` runs a mod's `init()` for real, writes and overlays included → any mod that acts on files at start must return early when `checking()` is true, or `scripts/publish.sh` triggers it.
 - `node --test <dir>/` fails on Node 22 (it reads the argument as a file) → write the glob, `node --test dir/*.test.mjs`.
+- A hooks-module tool answered from a `tool.call` hook never reaches `tool.check`, so its permission guard is dead code → serve a registered tool from `tool.run`, and prove the guard with a run that must be refused (`claude --plugin-dir . --debug-file <f> -p …`, then grep the log for `tool.check`).
+- fzf's full-screen interface covers anything printed before it starts → put the question in `--header`; check a picker with a screenshot, not from its exit code.
