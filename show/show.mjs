@@ -1,0 +1,227 @@
+// forge show: turns a block list into a page pane and log panes beside a session in the Herdr desktop app.
+//   open            reads one JSON view on stdin and prints one JSON line, {"result"} or {"deny"}
+//   serve <stem>    the page pane's program: shows the page and keeps command blocks fresh
+//   log <stem> <n>  a log pane's program
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { readFileSync, writeFileSync, renameSync, mkdirSync, rmdirSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createInterface } from 'node:readline'
+import { PAGE, specError, rowsFrom } from './blocks.mjs'
+import { palette, pageBlocks, pageHtml } from './page.mjs'
+
+const SELF = fileURLToPath(import.meta.url)
+const DIR = () => process.env.FORGE_SHOW_DIR || join(homedir(), '.cache/forge/show')
+const path = (name) => join(DIR(), name)
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const read = (file) => JSON.parse(readFileSync(file, 'utf8'))
+const first200 = (e) => String(e?.message ?? e).slice(0, 200)
+
+function sh(argv, opts) {
+  const PATH = [process.env.FORGE_SHOW_PATH_FIRST, `${homedir()}/.local/bin`, '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH].filter(Boolean).join(':')
+  return execFileSync(argv[0], argv.slice(1), { encoding: 'utf8', env: { ...process.env, PATH }, ...opts })
+}
+
+const runShell = (command, cwd) => sh(['sh', '-c', command], { cwd, timeout: 20000, maxBuffer: 8 << 20 })
+const herdr = (...args) => JSON.parse(sh(['herdr-app', 'do', ...args]))
+const enter = () => new Promise((done) => createInterface({ input: process.stdin }).once('line', done))
+
+export const stemOf = (terminal, pane) => terminal.toLowerCase().replace(/[^a-z0-9]/g, '-') + '-' + pane
+export const shq = (text) => "'" + text.replace(/'/g, "'\\''") + "'"
+export const diffCommand = (block) => 'git -C ' + shq(block.repo) + ' diff --no-color --no-ext-diff ' + shq(block.base ?? 'HEAD') + ' --'
+
+export function plan(view) {
+  const out = { page: [], logs: [], asks: [] }
+  view.blocks.forEach((b, n) => {
+    if (PAGE.includes(b.type)) out.page.push(n)
+    else if (b.type === 'log') out.logs.push(n)
+    else out.asks.push(n)
+  })
+  return out
+}
+
+function put(file, text) {
+  const tmp = file + '.' + process.pid + '.tmp'
+  writeFileSync(tmp, text)
+  renameSync(tmp, file)
+}
+
+export function buildPage(view, themeFile, version, { run, data }) {
+  const pageOnly = []
+  const extra = new Map()
+  view.blocks.forEach((b, n) => {
+    if (!PAGE.includes(b.type)) return
+    if (b.type === 'diff' && b.repo) {
+      try { extra.set(pageOnly.length, { patch: run(diffCommand(b), view.cwd) }) } catch (e) { extra.set(pageOnly.length, { error: first200(e) }) }
+    } else if (b.command && data[n]) extra.set(pageOnly.length, data[n])
+    pageOnly.push(b)
+  })
+  return pageHtml({ stem: stemOf(view.terminal, view.pane), title: view.title, blocks: pageBlocks(pageOnly, extra), palette: palette(themeFile), version })
+}
+
+export function due(view, lastRun, now) {
+  const ids = []
+  view.blocks.forEach((b, n) => {
+    if (PAGE.includes(b.type) && b.command && (lastRun[n] === undefined || now - lastRun[n] >= (b.every ?? 60) * 1000)) ids.push(n)
+  })
+  return ids
+}
+
+function writePage(stem, view, data) {
+  let themeFile
+  try { themeFile = read(path('theme.json')) } catch { /* the page falls back to the default palette */ }
+  const version = String(Date.now())
+  put(path(stem + '.html'), buildPage(view, themeFile, version, { run: runShell, data }))
+  put(path(stem + '.v.js'), 'window.__v=' + JSON.stringify(version))
+}
+
+function themeKey() {
+  let theme = null
+  try {
+    const cfg = join(homedir(), '.config/herdr-app')
+    const layout = read(join(cfg, 'shared.json')).layout ?? 'main'
+    theme = read(join(cfg, 'layouts/.state', layout + '.json')).theme ?? null
+  } catch { /* no readable theme: key on null */ }
+  let mode = 'Light'
+  try { mode = sh(['defaults', 'read', '-g', 'AppleInterfaceStyle'], { stdio: ['ignore', 'pipe', 'ignore'] }).trim() } catch { /* light mode has no value */ }
+  // ponytail: a custom theme file edited in place is not noticed until the theme or appearance changes; add its mtime to the key if that bites.
+  return JSON.stringify(theme) + '|' + mode
+}
+
+function takeLock() {
+  const lock = path('lock')
+  for (const end = Date.now() + 5000; ; sleep(100)) {
+    try { mkdirSync(lock); return lock } catch (e) {
+      if (e.code !== 'EEXIST' || Date.now() > end) throw e
+      try { if (Date.now() - statSync(lock).mtimeMs > 10000) rmdirSync(lock) } catch { /* another process took it */ }
+    }
+  }
+}
+
+// why: mod.open is a toggle and request.json is one file, so two show calls at once would cancel each other without the lock.
+// Returns whether the helper acknowledged in time.
+function askHelper(key, theme, floats) {
+  const lock = takeLock()
+  try {
+    const id = process.pid + '-' + Date.now()
+    put(path('request.json'), JSON.stringify({ id, key, theme, floats }))
+    sh(['herdr-app', 'do', 'mod.open', '--name', 'forge-show'])
+    for (const end = Date.now() + (Number(process.env.FORGE_SHOW_ACK_MS) || 3000); Date.now() < end; sleep(100)) {
+      try { if (read(path('ack.json')).id === id) return true } catch { /* not written yet */ }
+    }
+    return false
+  } finally { rmdirSync(lock) }
+}
+
+const terminalsOf = (ls) => ls.spaces.flatMap((s) => s.tabs.flatMap((t) => t.terminals))
+
+function open(view) {
+  const bad = specError(view)
+  if (bad) return { deny: bad }
+  const terminal = view.terminal ?? process.env.HC_TERMINAL_ID
+  if (!terminal) return { deny: 'forge show needs the Herdr desktop app (HC_TERMINAL_ID is not set).' }
+  let terminals = []
+  try { terminals = terminalsOf(JSON.parse(sh(['herdr-app', 'ls']))) } catch { /* handled below */ }
+  const me = terminals.find((t) => t.terminal === terminal)
+  if (!me) return { deny: "forge show could not find this session's pane in the Herdr app." }
+  const { page, logs, asks } = plan(view)
+  if (asks.length) return { deny: 'choice and confirm are not built yet' }
+
+  const stem = stemOf(terminal, view.pane)
+  const cwd = view.cwd ?? process.cwd()
+  const alive = (p) => p && terminals.some((t) => t.terminal === p.terminal)
+  let panes = {}
+  try { panes = read(path(stem + '.json')).panes ?? {} } catch { /* first show of this pane */ }
+  mkdirSync(DIR(), { recursive: true })
+  const stored = { ...view, terminal, cwd, panes, stamp: Date.now() }
+  put(path(stem + '.json'), JSON.stringify(stored))
+
+  const key = themeKey()
+  let current = false
+  try { current = read(path('theme.json')).key === key } catch { /* missing */ }
+  if (!current) askHelper(key, true, [])
+
+  let opened = false
+  if (page.length) {
+    writePage(stem, stored, {})
+    if (!alive(panes.page)) {
+      panes.page = herdr('pane.split', '--direction', view.placement ?? 'right', '--pane', me.pane, '--argv', JSON.stringify(['node', SELF, 'serve', stem]))
+      opened = true
+    }
+  }
+  for (const k of Object.keys(panes).filter((k) => k.startsWith('log'))) {
+    if (alive(panes[k])) herdr('pane.close', '--pane', panes[k].pane)
+    delete panes[k]
+  }
+  for (const n of logs) {
+    panes['log' + n] = herdr('pane.split', '--direction', 'down', '--pane', me.pane, '--argv', JSON.stringify(['node', SELF, 'log', stem, String(n)]))
+    opened = true
+  }
+  put(path(stem + '.json'), JSON.stringify({ ...stored, panes }))
+  try { herdr('pane.focus', '--terminal', terminal) } catch { /* focus is a nicety */ }
+  return { result: opened ? `Opened the ${view.pane} pane beside this session.` : `Updated the ${view.pane} pane.` }
+}
+
+async function serve(stem) {
+  const file = path(stem + '.html')
+  const child = spawn('terminal-browser', ['open', file], {
+    stdio: 'inherit',
+    env: { ...process.env, PATH: [process.env.FORGE_SHOW_PATH_FIRST, `${homedir()}/.local/bin`, '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH].filter(Boolean).join(':') },
+  })
+  child.on('exit', (code) => process.exit(code ?? 0))
+  child.on('error', async () => {
+    console.log(`forge show: terminal-browser is not installed (brew install …); the page is at ${file}`)
+    await enter()
+    process.exit(1)
+  })
+  let stamp, data = {}, lastRun = {}
+  const tick = () => {
+    let view
+    try { view = read(path(stem + '.json')) } catch { return }
+    const changed = view.stamp !== stamp
+    if (changed) { stamp = view.stamp; data = {}; lastRun = {} }
+    const now = Date.now()
+    const ids = due(view, lastRun, now)
+    if (!ids.length && !changed) return
+    for (const id of ids) {
+      lastRun[id] = now
+      try { data[id] = rowsFrom(JSON.parse(runShell(view.blocks[id].command, view.cwd))) } catch (e) { data[id] = { error: first200(e) } }
+    }
+    try { if (read(path(stem + '.json')).stamp !== stamp) return } catch { return }
+    writePage(stem, view, data)
+  }
+  setInterval(tick, 1000)
+}
+
+async function log(stem, n) {
+  const view = read(path(stem + '.json'))
+  const block = view.blocks[n]
+  try { process.chdir(view.cwd) } catch { /* run from where we are */ }
+  if (!block.every) {
+    const r = spawnSync('sh', ['-c', block.command], { stdio: 'inherit' })
+    console.log(`[exited ${r.status ?? r.signal}] press enter to close`)
+    return enter()
+  }
+  for (;; sleep(block.every * 1000)) {
+    const r = spawnSync('sh', ['-c', block.command], { encoding: 'utf8', timeout: 20000, maxBuffer: 8 << 20 })
+    const out = (r.stdout ?? '').trimEnd().split('\n').slice(-(block.lines ?? 40)).join('\n')
+    process.stdout.write('\x1b[2J\x1b[H' + out + '\n' + (r.stderr ?? ''))
+  }
+}
+
+async function main([cmd, ...args]) {
+  if (cmd === 'open') {
+    let out
+    try { out = open(JSON.parse(readFileSync(0, 'utf8'))) } catch (e) {
+      if (!(e instanceof SyntaxError)) throw e
+      out = { deny: 'the view is not valid JSON.' }
+    }
+    console.log(JSON.stringify(out))
+  } else if (cmd === 'serve') await serve(args[0])
+  else if (cmd === 'log') await log(args[0], Number(args[1]))
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main(process.argv.slice(2)).catch((e) => { console.error(e?.message ?? e); process.exit(1) })
+}
