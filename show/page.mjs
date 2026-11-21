@@ -99,7 +99,7 @@ img { max-width: 100%; border-radius: 6px; }
 .compare figcaption { text-transform: uppercase; letter-spacing: .06em; margin: 0 0 6px; }
 @media (max-width: 420px) { .compare { grid-template-columns: 1fr; } }
 .mermaid { background: var(--panel); border-radius: 8px; padding: 16px; }
-.zoom { position: relative; overflow: hidden; background: var(--panel); border-radius: 8px; } .zoom .mermaid { margin: 0; cursor: grab; }
+.zoom { position: relative; overflow: hidden; max-height: calc(100vh - 180px); background: var(--panel); border-radius: 8px; } .zoom .mermaid { margin: 0; cursor: grab; }
 .zbar { position: absolute; top: 8px; right: 8px; z-index: 1; display: flex; gap: 4px; }
 .zbar button { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 2px 9px; font: inherit; cursor: pointer; }
 .d2h-wrapper { --d2h-bg-color: var(--bg); }
@@ -212,12 +212,20 @@ for (const b of spec.blocks) {
     svg.style.transformOrigin = '0 0'
     const apply = () => { svg.style.transform = \`translate(\${x}px,\${y}px) scale(\${k})\` }
     const by = (f) => { k = Math.min(8, Math.max(0.2, k * f)); apply() }
+    // Fit: the whole diagram inside the box, which is never taller than the window.
+    const fitBox = () => {
+      svg.style.transform = ''
+      const s = svg.getBoundingClientRect(), b = box.getBoundingClientRect()
+      k = Math.min(1, b.width / s.width, b.height / s.height) || 1
+      x = (b.width - s.width * k) / 2; y = 0; apply()
+    }
     const [minus, plus, fit] = box.querySelectorAll('.zbar button')
-    minus.onclick = () => by(1 / 1.25); plus.onclick = () => by(1.25); fit.onclick = () => { k = 1; x = 0; y = 0; apply() }
+    minus.onclick = () => by(1 / 1.25); plus.onclick = () => by(1.25); fit.onclick = fitBox
     box.addEventListener('wheel', (e) => { if (!(e.ctrlKey || e.metaKey)) return; e.preventDefault(); by(e.deltaY < 0 ? 1.1 : 1 / 1.1) }, { passive: false })
     box.addEventListener('pointerdown', (e) => { if (e.target.closest('.zbar')) return; drag = { px: e.clientX - x, py: e.clientY - y }; box.setPointerCapture(e.pointerId) })
     box.addEventListener('pointermove', (e) => { if (!drag) return; x = e.clientX - drag.px; y = e.clientY - drag.py; apply() })
     box.addEventListener('pointerup', () => { drag = null })
+    fitBox()
   }
 })()
 window.__seen=${js(version)}
