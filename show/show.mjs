@@ -30,6 +30,10 @@ export const stemOf = (terminal, pane) => terminal.toLowerCase().replace(/[^a-z0
 export const shq = (text) => "'" + text.replace(/'/g, "'\\''") + "'"
 export const pickerRows = (block) => block.options.map((o, i) => `${i}\t${o.label.replace(/[\t\r\n]/g, ' ')}`)
 export const pickedFrom = (block, stdout) => block.options[Number.parseInt(stdout, 10)]
+export const pickerHeader = (view, block) => {
+  const text = block.type === 'confirm' ? block.summary + (typeof block.consequence === 'string' && block.consequence ? '\n\n' + block.consequence : '') : (block.prompt ?? view.title)
+  return String(text).replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, ' ').slice(0, 1000)
+}
 export const diffCommand = (block) => 'git -C ' + shq(block.repo) + ' diff --no-color --no-ext-diff ' + shq(block.base ?? 'HEAD') + ' --'
 
 export function plan(view) {
@@ -263,10 +267,9 @@ async function pick(file) {
   try {
     const block = view.block
     const confirm = block.type === 'confirm'
-    if (confirm) console.log(block.summary + (block.consequence ? '\n' + block.consequence : ''))
     const options = confirm ? [{ label: block.confirm_label ?? 'Confirm' }, { label: 'Cancel' }] : block.options
     const preview = !confirm && options.some((o) => o.preview) && 'node ' + shq(SELF) + ' preview ' + shq(file) + ' {1}'
-    const chosen = await choose({ options }, block.prompt ?? view.title, preview)
+    const chosen = await choose({ options }, pickerHeader(view, block), preview)
     if (!chosen) return
     try { sh(['hc', 'send', view.terminal, answerText(view.pane, block, confirm ? { confirmed: chosen === options[0] } : chosen)]) } catch (e) {
       console.log(first200(e))

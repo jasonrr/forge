@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { stemOf, plan, diffCommand, buildPage, due, pickerRows, pickedFrom } from './show.mjs'
+import { stemOf, plan, diffCommand, buildPage, due, pickerRows, pickedFrom, pickerHeader } from './show.mjs'
 
 const SHOW = new URL('./show.mjs', import.meta.url).pathname
 const tmp = () => mkdtempSync(join(tmpdir(), 'forge-show-'))
@@ -202,4 +202,21 @@ test('open keeps the log panes when the question window fails', () => {
   assert.match(t.calls(), /hc kill t9/)
   assert.match(t.calls(), /do pane\.split/)
   assert.deepEqual(readdirSync(t.dir).filter((f) => f.includes('.ask-')), [])
+})
+
+test('pickerHeader: choice uses the prompt, else the view title', () => {
+  assert.equal(pickerHeader({ title: 'T' }, { type: 'choice', prompt: 'Which?' }), 'Which?')
+  assert.equal(pickerHeader({ title: 'T' }, { type: 'choice' }), 'T')
+})
+
+test('pickerHeader: confirm shows the summary and the consequence', () => {
+  const view = { title: 'T' }
+  assert.equal(pickerHeader(view, { type: 'confirm', summary: 'Delete it?\nReally', consequence: 'Cannot be undone.' }), 'Delete it?\nReally\n\nCannot be undone.')
+  assert.equal(pickerHeader(view, { type: 'confirm', summary: 'Delete it?' }), 'Delete it?')
+  assert.equal(pickerHeader(view, { type: 'confirm', summary: 'Delete it?', consequence: '' }), 'Delete it?')
+})
+
+test('pickerHeader: control characters become spaces and the text is capped', () => {
+  assert.equal(pickerHeader({ title: 'T' }, { type: 'confirm', summary: 'a\u001b[31mb' }), 'a [31mb')
+  assert.equal(pickerHeader({ title: 'T' }, { type: 'confirm', summary: 'x'.repeat(2000) }).length, 1000)
 })
