@@ -20,7 +20,7 @@ const first200 = (e) => String(e?.message ?? e).slice(0, 200)
 
 function sh(argv, opts) {
   const PATH = [process.env.FORGE_SHOW_PATH_FIRST, `${homedir()}/.local/bin`, '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH].filter(Boolean).join(':')
-  return execFileSync(argv[0], argv.slice(1), { encoding: 'utf8', env: { ...process.env, PATH }, ...opts })
+  return execFileSync(argv[0], argv.slice(1), { encoding: 'utf8', env: { ...process.env, PATH }, timeout: 10000, ...opts })
 }
 
 const runShell = (command, cwd) => sh(['sh', '-c', command], { cwd, timeout: 20000, maxBuffer: 8 << 20 })
@@ -63,7 +63,7 @@ export function buildPage(view, themeFile, version, { run, data }) {
 export function due(view, lastRun, now) {
   const ids = []
   view.blocks.forEach((b, n) => {
-    if (PAGE.includes(b.type) && b.command && (lastRun[n] === undefined || now - lastRun[n] >= (b.every ?? 60) * 1000)) ids.push(n)
+    if (['table', 'chart'].includes(b.type) && b.command && (lastRun[n] === undefined || now - lastRun[n] >= (b.every ?? 60) * 1000)) ids.push(n)
   })
   return ids
 }
@@ -91,30 +91,37 @@ function themeKey() {
 
 function takeLock() {
   const lock = path('lock')
-  for (const end = Date.now() + 5000; ; sleep(100)) {
+  for (const end = Date.now() + 8000; ; sleep(100)) {
     try { mkdirSync(lock); return lock } catch (e) {
       if (e.code !== 'EEXIST' || Date.now() > end) throw e
-      try { if (Date.now() - statSync(lock).mtimeMs > 10000) rmdirSync(lock) } catch { /* another process took it */ }
+      try { if (Date.now() - statSync(lock).mtimeMs > 6000) rmdirSync(lock) } catch { /* another process took it */ }
     }
   }
 }
 
 // why: mod.open is a toggle and request.json is one file, so two show calls at once would cancel each other without the lock.
-// Returns whether the helper acknowledged in time.
+// Returns whether the helper acknowledged in time; false also when the lock or the helper mod is unavailable.
 function askHelper(key, theme, floats) {
-  const lock = takeLock()
+  let lock
+  try { lock = takeLock() } catch { return false }
   try {
     const id = process.pid + '-' + Date.now()
     put(path('request.json'), JSON.stringify({ id, key, theme, floats }))
-    sh(['herdr-app', 'do', 'mod.open', '--name', 'forge-show'])
+    try { sh(['herdr-app', 'do', 'mod.open', '--name', 'forge-show']) } catch { return false }
     for (const end = Date.now() + (Number(process.env.FORGE_SHOW_ACK_MS) || 3000); Date.now() < end; sleep(100)) {
       try { if (read(path('ack.json')).id === id) return true } catch { /* not written yet */ }
     }
     return false
-  } finally { rmdirSync(lock) }
+  } finally { try { rmdirSync(lock) } catch { /* another process cleared it as stale */ } }
 }
 
 const terminalsOf = (ls) => ls.spaces.flatMap((s) => s.tabs.flatMap((t) => t.terminals))
+
+function split(direction, pane, argv) {
+  const r = herdr('pane.split', '--direction', direction, '--pane', pane, '--argv', JSON.stringify(argv))
+  if (r.error || typeof r.terminal !== 'string') throw new Error(r.error ?? 'pane.split returned no terminal')
+  return r
+}
 
 function open(view) {
   const bad = specError(view)
@@ -143,22 +150,30 @@ function open(view) {
   if (!current) askHelper(key, true, [])
 
   let opened = false
-  if (page.length) {
-    writePage(stem, stored, {})
-    if (!alive(panes.page)) {
-      panes.page = herdr('pane.split', '--direction', view.placement ?? 'right', '--pane', me.pane, '--argv', JSON.stringify(['node', SELF, 'serve', stem]))
+  try {
+    if (page.length) {
+      writePage(stem, stored, {})
+      if (!alive(panes.page)) {
+        panes.page = split(view.placement ?? 'right', me.pane, ['node', SELF, 'serve', stem])
+        opened = true
+      }
+    } else if (alive(panes.page)) {
+      herdr('pane.close', '--pane', panes.page.pane)
+      delete panes.page
+    }
+    for (const k of Object.keys(panes).filter((k) => k.startsWith('log'))) {
+      if (alive(panes[k])) herdr('pane.close', '--pane', panes[k].pane)
+      delete panes[k]
+    }
+    for (const n of logs) {
+      panes['log' + n] = split('down', me.pane, ['node', SELF, 'log', stem, String(n)])
       opened = true
     }
+  } catch (e) {
+    return { deny: `forge show could not open the pane: ${first200(e)}` }
+  } finally {
+    put(path(stem + '.json'), JSON.stringify({ ...stored, panes }))
   }
-  for (const k of Object.keys(panes).filter((k) => k.startsWith('log'))) {
-    if (alive(panes[k])) herdr('pane.close', '--pane', panes[k].pane)
-    delete panes[k]
-  }
-  for (const n of logs) {
-    panes['log' + n] = herdr('pane.split', '--direction', 'down', '--pane', me.pane, '--argv', JSON.stringify(['node', SELF, 'log', stem, String(n)]))
-    opened = true
-  }
-  put(path(stem + '.json'), JSON.stringify({ ...stored, panes }))
   try { herdr('pane.focus', '--terminal', terminal) } catch { /* focus is a nicety */ }
   return { result: opened ? `Opened the ${view.pane} pane beside this session.` : `Updated the ${view.pane} pane.` }
 }
@@ -184,9 +199,10 @@ async function serve(stem) {
     const now = Date.now()
     const ids = due(view, lastRun, now)
     if (!ids.length && !changed) return
+    // ponytail: commands run one at a time and block this loop while they run (20 s cap each); make them async if a pane with several slow commands feels stuck.
     for (const id of ids) {
-      lastRun[id] = now
       try { data[id] = rowsFrom(JSON.parse(runShell(view.blocks[id].command, view.cwd))) } catch (e) { data[id] = { error: first200(e) } }
+      lastRun[id] = Date.now()
     }
     try { if (read(path(stem + '.json')).stamp !== stamp) return } catch { return }
     writePage(stem, view, data)
@@ -206,22 +222,20 @@ async function log(stem, n) {
   for (;; sleep(block.every * 1000)) {
     const r = spawnSync('sh', ['-c', block.command], { encoding: 'utf8', timeout: 20000, maxBuffer: 8 << 20 })
     const out = (r.stdout ?? '').trimEnd().split('\n').slice(-(block.lines ?? 40)).join('\n')
-    process.stdout.write('\x1b[2J\x1b[H' + out + '\n' + (r.stderr ?? ''))
+    process.stdout.write('\x1b[2J\x1b[H' + out + '\n' + (r.stderr ?? '') + (r.error ? r.error.message + '\n' : ''))
   }
 }
 
 async function main([cmd, ...args]) {
   if (cmd === 'open') {
-    let out
-    try { out = open(JSON.parse(readFileSync(0, 'utf8'))) } catch (e) {
-      if (!(e instanceof SyntaxError)) throw e
-      out = { deny: 'the view is not valid JSON.' }
-    }
-    console.log(JSON.stringify(out))
+    const text = readFileSync(0, 'utf8')
+    let view
+    try { view = JSON.parse(text) } catch { return console.log(JSON.stringify({ deny: 'the view is not valid JSON.' })) }
+    console.log(JSON.stringify(open(view)))
   } else if (cmd === 'serve') await serve(args[0])
   else if (cmd === 'log') await log(args[0], Number(args[1]))
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main(process.argv.slice(2)).catch((e) => { console.error(e?.message ?? e); process.exit(1) })
 }

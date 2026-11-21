@@ -131,6 +131,8 @@ export function specError(view) {
   if (!isStr(view.pane) || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(view.pane)) return err('/pane', 'lowercase letters, digits and dashes, 1 to 40 characters')
   if (!isStr(view.title)) return err('/title', 'a string')
   if (view.placement !== undefined && !['right', 'down'].includes(view.placement)) return err('/placement', 'right or down')
+  if (view.terminal !== undefined && !isStr(view.terminal)) return err('/terminal', 'a string')
+  if (view.cwd !== undefined && !isStr(view.cwd)) return err('/cwd', 'a string')
   if (!Array.isArray(view.blocks) || !view.blocks.length || !view.blocks.every(isObj)) return err('/blocks', 'a non-empty array of objects')
   for (const [i, b] of view.blocks.entries()) {
     const p = `/blocks/${i}`

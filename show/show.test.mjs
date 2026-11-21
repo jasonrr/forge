@@ -33,6 +33,10 @@ test('buildPage survives a failing diff', () => {
   assert.match(buildPage(view, undefined, 'v', { run: () => { throw new Error('nogit') }, data: {} }), /nogit/)
 })
 
+test('due ignores diff blocks', () => {
+  assert.deepEqual(due({ blocks: [{ type: 'diff', repo: '/r', command: 'x' }, { type: 'chart', command: 'y' }] }, {}, 0), [1])
+})
+
 test('due', () => {
   const view = { blocks: [{ type: 'table', command: 'x', every: 5 }, { type: 'table', command: 'y' }] }
   assert.deepEqual(due(view, { 0: 1000 }, 5999), [1])
@@ -77,4 +81,53 @@ test('open splits a page pane without the helper when the theme is current', () 
   const calls = readFileSync(log, 'utf8')
   assert.equal(calls.match(/do pane\.split/g).length, 1)
   assert.doesNotMatch(calls, /mod\.open/)
+})
+
+const rig = (herdrBody) => {
+  const dir = tmp()
+  const bin = tmp()
+  const log = join(bin, 'log')
+  const fake = (name, body) => { writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`); chmodSync(join(bin, name), 0o755) }
+  fake('herdr-app', `echo "$*" >> '${log}'\nif [ "$1" = ls ]; then echo '{"spaces":[{"tabs":[{"terminals":[{"terminal":"t1","pane":"p1"},{"terminal":"t9","pane":"p9"}]}]}]}'; else ${herdrBody}; fi`)
+  fake('defaults', 'echo Dark')
+  const env = { FORGE_SHOW_DIR: dir, FORGE_SHOW_PATH_FIRST: bin, HC_TERMINAL_ID: 't1', HOME: tmp() }
+  return { dir, env, calls: () => readFileSync(log, 'utf8'), theme: () => writeFileSync(join(dir, 'theme.json'), JSON.stringify({ key: 'null|Dark', theme: {}, settings: {} })) }
+}
+const logOnly = { pane: 'chk', title: 't', blocks: [{ type: 'log', command: 'echo hi' }] }
+
+test('open carries on when the helper mod is missing', () => {
+  const t = rig('if [ "$2" = mod.open ]; then exit 3; fi; echo \'{"pane":"p2","terminal":"t2"}\'')
+  const r = open(stats, t.env)
+  assert.equal(r.status, 0, r.stderr)
+  assert.deepEqual(JSON.parse(r.stdout), { result: 'Opened the chk pane beside this session.' })
+  assert.ok(existsSync(join(t.dir, 't1-chk.html')))
+})
+
+test('open denies a failed pane.split and keeps what opened', () => {
+  for (const body of ['echo \'{"error":"nope"}\'', 'echo \'{"pane":"p2"}\'']) {
+    const t = rig(body)
+    t.theme()
+    const r = open(stats, t.env)
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(JSON.parse(r.stdout).deny, /^forge show could not open the pane: /)
+    assert.deepEqual(JSON.parse(readFileSync(join(t.dir, 't1-chk.json'), 'utf8')).panes, {})
+  }
+  const t = rig('echo \'{"error":"nope"}\'')
+  t.theme()
+  assert.equal(JSON.parse(open(stats, t.env).stdout).deny, 'forge show could not open the pane: nope')
+  const x = rig('exit 1')
+  x.theme()
+  const r = open(stats, x.env)
+  assert.equal(r.status, 0)
+  assert.match(JSON.parse(r.stdout).deny, /^forge show could not open the pane: /)
+})
+
+test('open closes a stale page pane when the view has no page blocks', () => {
+  const t = rig('echo \'{"pane":"p2","terminal":"t2"}\'')
+  t.theme()
+  writeFileSync(join(t.dir, 't1-chk.json'), JSON.stringify({ panes: { page: { pane: 'p9', terminal: 't9' } } }))
+  const r = open(logOnly, t.env)
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(t.calls(), /do pane\.close --pane p9/)
+  assert.equal(JSON.parse(readFileSync(join(t.dir, 't1-chk.json'), 'utf8')).panes.page, undefined)
 })
