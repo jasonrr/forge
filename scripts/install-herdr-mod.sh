@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# Point Herdr at the forge mod in this checkout: ~/.config/herdr-app/mods/forge -> herdr/mods/forge.
-# Also adds Forge keys to keys.json and prints how to hide the old docked block. Idempotent. A real folder already there (the old hand-made mod) is moved aside, never deleted.
+# Point Herdr at the forge and forge-show mods in this checkout: ~/.config/herdr-app/mods/<mod> -> herdr/mods/<mod>.
+# Also adds Forge keys to keys.json and prints how to hide the old docked block. Idempotent. A real folder already there (e.g. the old hand-made forge mod) is moved aside, never deleted.
 set -euo pipefail
-src="$(cd "$(dirname "$0")/.." && pwd)/herdr/mods/forge"
-dst="${HERDR_APP_HOME:-$HOME/.config/herdr-app}/mods/forge"
-[ -f "$src/main.js" ] || { echo "install-herdr-mod: $src/main.js missing" >&2; exit 1; }
-mkdir -p "$(dirname "$dst")"
-linked=
-if [ -L "$dst" ]; then
-  if [ "$(readlink "$dst")" = "$src" ]; then linked=1; echo "install-herdr-mod: already linked"; else rm "$dst"; fi
-elif [ -e "$dst" ]; then
-  mv "$dst" "$(dirname "$(dirname "$dst")")/forge-mod.bak-$(date +%Y%m%d%H%M%S)" # out of mods/, or Herdr loads the backup as a second mod
-fi
-[ -n "$linked" ] || { ln -s "$src" "$dst"; echo "install-herdr-mod: $dst -> $src"; }
+for mod in forge forge-show; do
+  src="$(cd "$(dirname "$0")/.." && pwd)/herdr/mods/$mod"
+  dst="${HERDR_APP_HOME:-$HOME/.config/herdr-app}/mods/$mod"
+  [ -f "$src/main.js" ] || { echo "install-herdr-mod: $src/main.js missing" >&2; exit 1; }
+  mkdir -p "$(dirname "$dst")"
+  linked=
+  if [ -L "$dst" ]; then
+    if [ "$(readlink "$dst")" = "$src" ]; then linked=1; echo "install-herdr-mod: $mod already linked"; else rm "$dst"; fi
+  elif [ -e "$dst" ]; then
+    mv "$dst" "$(dirname "$(dirname "$dst")")/$mod-mod.bak-$(date +%Y%m%d%H%M%S)" # out of mods/, or Herdr loads the backup as a second mod
+  fi
+  [ -n "$linked" ] || { ln -s "$src" "$dst"; echo "install-herdr-mod: $dst -> $src"; }
+done
 
 app="${HERDR_APP_HOME:-$HOME/.config/herdr-app}"
 command -v node >/dev/null || { echo "install-herdr-mod: node not found; keys and the hide hint skipped" >&2; exit 0; }
