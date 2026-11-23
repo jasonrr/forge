@@ -23,7 +23,7 @@ If this session has a tool named `mcp__forge__show`, stop here and use that tool
    node "$HOME/.claude/skills/forge-show/page.mjs" .forge-show/<name>.json
    ```
 
-   It prints one JSON line. `{"result": ...}` means the page is in `.forge-show/<name>/` and says what to do next. `{"deny": ...}` names what is wrong (`at blocks[2]: ...`): fix the view and run it again.
+   It prints one JSON line. `{"result": ...}` means the page is in `.forge-show/<name>/` and says what to do next. `{"deny": ...}` names what is wrong and where (`at /blocks/2/rows: ...`): fix the view and run it again.
 
 3. **Show it**, when the result says to: call `show_html` with `path` set to `.forge-show/<name>`, `live` set to true, and a `title` (one line, at most 80 characters).
 
@@ -33,13 +33,13 @@ To change a drawing, write the view again under the same `<name>` and run step 2
 
 Any block takes an optional `title`.
 
-- `{type:"stats", items:[{label, value, note?, delta?, good?, spark?:[numbers]}]}`: headline figures as tiles. `good` says whether the delta is good news.
-- `{type:"chart", kind:"line"|"area"|"bar"|"donut", columns, rows, x?, y?:[columns], stacked?, percent?, horizontal?, unit?}`: rows are arrays. Line or area over time, bar for categories, `horizontal:true` for rankings and long names, `stacked:true` or `percent:true` for parts of a whole per category, donut for one whole split in a few parts.
-- `{type:"table", columns, rows}`: at most 5000 rows.
-- `{type:"flow", nodes:[{id, label, kind?:"box"|"round"|"decision"}], edges:[{from, to, label?}], direction?:"down"|"right"}`
+- `{type:"stats", items:[{label, value, note?, delta?, good?, spark?:[numbers]}]}`: headline figures as tiles, 1 to 8 items. `good` says whether the delta is good news.
+- `{type:"chart", kind:"line"|"area"|"bar"|"donut", columns, rows, x?, y?:[columns], stacked?, percent?, horizontal?, unit?}`: rows are arrays of strings, numbers, booleans or null. Line or area over time, bar for categories, `horizontal:true` for rankings and long names, `stacked:true` or `percent:true` for parts of a whole per category, donut for one whole split in a few parts.
+- `{type:"table", columns, rows}`: at most 5000 rows; cells are strings, numbers, booleans or null.
+- `{type:"flow", nodes:[{id, label, kind?:"box"|"round"|"decision"}], edges:[{from, to, label?}], direction?:"down"|"right"}`: 1 to 60 nodes.
 - `{type:"sequence", actors?:[...], messages:[{from, to, label, reply?} | {note, over}]}`
 - `{type:"mermaid", text}`
-- `{type:"image", path|url, caption?}`: `path` is an absolute file path (the picture is copied into the page folder); `url` is http or https.
+- `{type:"image", path|url, caption?}`: `path` is an absolute file path, starting with `/` (run `pwd` for your working folder's; the picture is copied into the page folder); `url` is http or https.
 - `{type:"compare", before, after}`: two pictures side by side, each an absolute path or an http(s) URL.
 - `{type:"diff", repo:<absolute path>, base?}` or `{type:"diff", patch}`
 - `{type:"markdown", text}`

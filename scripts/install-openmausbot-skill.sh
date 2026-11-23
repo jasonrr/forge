@@ -7,12 +7,13 @@ set -euo pipefail
 src="$(cd "$(dirname "$0")/.." && pwd)/openmausbot/forge-show"
 dst="$HOME/.claude/skills/forge-show"
 [ -f "$src/SKILL.md" ] || { echo "install-openmausbot-skill: $src/SKILL.md missing" >&2; exit 1; }
+[ -f "$src/../../.git" ] && echo "install-openmausbot-skill: warning: linking into a worktree; the link breaks when it is removed. Run it from the main checkout." >&2
 mkdir -p "$(dirname "$dst")"
 if [ -L "$dst" ]; then
   if [ "$(readlink "$dst")" = "$src" ]; then echo "install-openmausbot-skill: already linked"; exit 0; fi
   rm "$dst"
 elif [ -e "$dst" ]; then
-  mv "$dst" "$HOME/.claude/forge-show-skill.bak-$(date +%Y%m%d%H%M%S)"
+  mv "$dst" "$HOME/.claude/forge-show-skill.bak-$(date +%Y%m%d%H%M%S)-$$"
 fi
 ln -s "$src" "$dst"
 echo "install-openmausbot-skill: $dst -> $src"
