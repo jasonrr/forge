@@ -40,3 +40,7 @@ Trade-off accepted: the bot draws because a skill description says so, not becau
 
 - Does the card follow light and dark, and should the page? `show_html` exposes `--color-text-primary`, `--color-background-primary`, `--color-border-primary` and `--font-sans`; not used in this build.
 - Should the skill also be offered to Codex and pi sessions outside Herdr (issue from the forge-show design)? Not part of this build.
+
+## Deviations
+
+- T1 commit c34adb9 (+ 72b6dcb) — deviation: review fix, a copied picture is written atomically and only when its content-named file is new; a half-written folder after an unreadable picture and the html/version write order were kept as the plan accepts — parked: none
