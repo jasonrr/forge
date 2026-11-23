@@ -7,7 +7,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, renameSync, mkdirSync, rmdirSync, rmSync, statSync, readdirSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { extname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createInterface } from 'node:readline'
 import { PAGE, specError, rowsFrom, answerText } from './blocks.mjs'
@@ -56,7 +56,7 @@ function put(file, text) {
 }
 
 // The version is a hash of the page itself, so an unchanged page keeps its version and is not reloaded.
-export function buildPage(view, themeFile, { run, data }) {
+export function buildPage(view, themeFile, { run, data, stem }) {
   const pageOnly = []
   const extra = new Map()
   view.blocks.forEach((b, n) => {
@@ -67,7 +67,7 @@ export function buildPage(view, themeFile, { run, data }) {
     pageOnly.push(b)
   })
   const blocks = pageBlocks(pageOnly, extra)
-  const render = (version) => pageHtml({ stem: stemOf(view.terminal, view.pane), title: view.title, blocks, palette: palette(themeFile), version })
+  const render = (version) => pageHtml({ stem: stem ?? stemOf(view.terminal, view.pane), title: view.title, blocks, palette: palette(themeFile), version })
   const version = createHash('sha1').update(render('')).digest('hex').slice(0, 12)
   return { version, html: render(version) }
 }
@@ -88,6 +88,65 @@ function writePage(stem, view, data) {
   try { if (existsSync(path(stem + '.html')) && readFileSync(path(stem + '.v.js'), 'utf8') === stamp) return } catch { /* no version file yet */ }
   put(path(stem + '.html'), html)
   put(path(stem + '.v.js'), stamp)
+}
+
+// A picture the card can load: copied beside index.html, because a chat card cannot read file:// URLs.
+// Its name carries its content, so a picture rendered again under the same path changes the page and the live card reloads.
+function bring(dir, ref, name, kept) {
+  if (!ref.startsWith('/')) return ref
+  const bytes = readFileSync(ref)
+  const ext = /^\.[A-Za-z0-9]{1,5}$/.test(extname(ref)) ? extname(ref) : ''
+  const file = `${name}-${createHash('sha1').update(bytes).digest('hex').slice(0, 8)}${ext}`
+  writeFileSync(join(dir, file), bytes)
+  kept.add(file)
+  return file
+}
+
+// The OpenMausBot route: the same page as a folder for its show_html card. Nothing here calls Herdr or reads its theme.
+// The folder is always in the process's working folder: show_html refuses a folder outside the bot's own.
+export function pageFolder(view, cwd = process.cwd()) {
+  const bad = specError(view)
+  if (bad) return { deny: bad }
+  const off = view.blocks.findIndex((b) => !PAGE.includes(b.type) || b.command)
+  if (off >= 0) {
+    const b = view.blocks[off]
+    return { deny: `at blocks[${off}]: ` + (PAGE.includes(b.type) ? 'a page folder cannot run a command: run it yourself and pass columns and rows.' : `a page folder cannot hold a ${b.type} block (log, choice and confirm are Herdr only).`) }
+  }
+  const root = join(resolve(cwd), '.forge-show')
+  const dir = join(root, view.pane)
+  const rel = '.forge-show/' + view.pane
+  const existed = existsSync(join(dir, 'index.html'))
+  try {
+    mkdirSync(dir, { recursive: true })
+    if (!existsSync(join(root, '.gitignore'))) put(join(root, '.gitignore'), '*\n')
+  } catch (e) { return { deny: `cannot write ${rel}: ${first200(e)}` } }
+  const kept = new Set()
+  const blocks = []
+  for (const [n, b] of view.blocks.entries()) {
+    try {
+      if (b.type === 'image' && typeof b.path === 'string') {
+        const { path: from, ...rest } = b
+        blocks.push({ ...rest, url: bring(dir, from, 'p' + n, kept) })
+      } else if (b.type === 'compare') blocks.push({ ...b, before: bring(dir, b.before, `p${n}-before`, kept), after: bring(dir, b.after, `p${n}-after`, kept) })
+      else blocks.push(b)
+    } catch (e) { return { deny: `at blocks[${n}]: could not copy the picture: ${first200(e)}` } }
+  }
+  try {
+    const { version, html } = buildPage({ ...view, blocks, cwd: view.cwd ?? resolve(cwd) }, undefined, { run: runShell, data: {}, stem: 'index' })
+    const stamp = 'window.__v=' + JSON.stringify(version)
+    let same = false
+    try { same = existed && readFileSync(join(dir, 'index.v.js'), 'utf8') === stamp } catch { /* no version file yet */ }
+    if (!same) {
+      put(join(dir, 'index.html'), html)
+      put(join(dir, 'index.v.js'), stamp)
+    }
+    // Pictures an earlier version of this drawing used.
+    for (const name of readdirSync(dir)) {
+      if (/^p\d+(-before|-after)?-[0-9a-f]{8}(\.[A-Za-z0-9]{1,5})?$/.test(name) && !kept.has(name)) rmSync(join(dir, name), { force: true })
+    }
+  } catch (e) { return { deny: `cannot write ${rel}: ${first200(e)}` } }
+  const show = `call show_html with path "${rel}", live true and a title.`
+  return { result: existed ? `Updated the page folder ${rel}. A live card of it reloads by itself. Only if this conversation has no card for it, ${show}` : `Wrote the page folder ${rel}. Now ${show}` }
 }
 
 function themeKey() {
@@ -293,12 +352,13 @@ async function pick(file) {
   } finally { rmSync(file, { force: true }) }
 }
 
-async function main([cmd, ...args]) {
-  if (cmd === 'open') {
-    const text = readFileSync(0, 'utf8')
+export async function main([cmd, ...args]) {
+  if (cmd === 'open' || cmd === 'page') {
+    let text
+    try { text = readFileSync(cmd === 'page' && args[0] ? args[0] : 0, 'utf8') } catch { return console.log(JSON.stringify({ deny: `cannot read ${cmd === 'page' && args[0] ? args[0] : 'the view on stdin'}.` })) }
     let view
     try { view = JSON.parse(text) } catch { return console.log(JSON.stringify({ deny: 'the view is not valid JSON.' })) }
-    console.log(JSON.stringify(open(view)))
+    console.log(JSON.stringify(cmd === 'open' ? open(view) : pageFolder(view)))
   } else if (cmd === 'serve') await serve(args[0])
   else if (cmd === 'log') await log(args[0], Number(args[1]))
   else if (cmd === 'pick') await pick(args[0])
