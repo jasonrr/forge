@@ -2,6 +2,7 @@
 // model to draw without being asked. Only inside the Herdr desktop app (HC_TERMINAL_ID): elsewhere it does nothing.
 const TOOL = 'mcp__forge__show'
 const PATHS = 'PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"'
+// The block shapes and the Drawing results rule below are repeated, for bots that cannot load this module, in openmausbot/forge-show/SKILL.md: change both.
 const SPEC = {
   name: 'show',
   description: [

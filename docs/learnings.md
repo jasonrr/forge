@@ -79,3 +79,9 @@
 - "Reloads only when content changed" was in the design but the version was a timestamp, and no test held it → when a design states a property, the plan needs a test that names it.
 - The same rule written in four places (which blocks carry a command: hook, validator, refresh loop, page) had already drifted → validate once at the boundary and reject what the rest does not handle.
 - A release-time check on a file shared with another tool (Codex reads `hooks/hooks.json`) cannot be run from a feature branch → list it in the PR as a step before the release is relied on, and say it is untested.
+
+## show-in-openmausbot (PR #55, 2026-11-23)
+
+- A plan that pastes a near-copy of an existing write routine (writePage → pageFolder) → review flags drift; plan a shared helper up front.
+- A live card that reloads on any folder change → every "skip if unchanged" guard, pictures included, is load-bearing; say so in the comment or a reviewer will call it dead code.
+- In zsh, ${VAR:+--flag value} passes one word → write optional CLI args out explicitly in hc/herdr commands.

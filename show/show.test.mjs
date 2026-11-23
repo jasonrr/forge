@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, readdirSync, statSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, readdirSync, statSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { stemOf, plan, diffCommand, buildPage, due, pickerRows, pickedFrom, pickerHeader, plain } from './show.mjs'
@@ -279,4 +279,123 @@ test('pickerHeader: confirm shows the summary and the consequence', () => {
 test('pickerHeader: control characters become spaces and the text is capped', () => {
   assert.equal(pickerHeader({ title: 'T' }, { type: 'confirm', summary: 'a\u001b[31mb' }), 'a [31mb')
   assert.equal(pickerHeader({ title: 'T' }, { type: 'confirm', summary: 'x'.repeat(2000) }).length, 1000)
+})
+
+const page = (view, { cwd = tmp(), env = {}, args = [], stdin = JSON.stringify(view) } = {}) => {
+  const r = spawnSync('node', [SHOW, 'page', ...args], { input: stdin, encoding: 'utf8', cwd, env: { ...process.env, ...env } })
+  return { ...r, cwd, out: r.stdout.trim() ? JSON.parse(r.stdout.trim().split('\n').pop()) : undefined }
+}
+
+test('page writes a folder in the working folder and calls nothing from Herdr', () => {
+  const bin = tmp()
+  const log = join(bin, 'log')
+  for (const name of ['herdr-app', 'hc', 'terminal-browser']) { writeFileSync(join(bin, name), `#!/bin/sh\necho "${name} $*" >> '${log}'\n`); chmodSync(join(bin, name), 0o755) }
+  const r = page({ ...stats, cwd: tmp() }, { env: { FORGE_SHOW_PATH_FIRST: bin, HC_TERMINAL_ID: '' } })
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(r.out.result, 'Wrote the page folder .forge-show/chk. Now call show_html with path ".forge-show/chk", live true and a title.')
+  const dir = join(r.cwd, '.forge-show', 'chk')
+  assert.match(readFileSync(join(dir, 'index.html'), 'utf8'), /index\.v\.js/)
+  assert.match(readFileSync(join(dir, 'index.v.js'), 'utf8'), /^window\.__v="[0-9a-f]{12}"$/)
+  assert.equal(readFileSync(join(r.cwd, '.forge-show', '.gitignore'), 'utf8'), '*\n')
+  assert.ok(!existsSync(log), 'no Herdr program may run')
+})
+
+test('page reads the view from a file argument', () => {
+  const file = join(tmp(), 'view.json')
+  writeFileSync(file, JSON.stringify(stats))
+  const r = page(stats, { args: [file], stdin: '' })
+  assert.match(r.out.result, /^Wrote the page folder/)
+  assert.ok(existsSync(join(r.cwd, '.forge-show', 'chk', 'index.html')))
+})
+
+test('page denies a block a folder cannot hold and writes nothing; it denies bad specs, bad JSON and an unreadable file', () => {
+  const view = (block) => ({ pane: 'a', title: 'T', blocks: [{ type: 'stats', items: [{ label: 'A', value: 1 }] }, block] })
+  const denied = page(view({ type: 'log', command: 'date' }))
+  assert.match(denied.out.deny, /^at blocks\[1\]: a page folder cannot hold a log block/)
+  assert.ok(!existsSync(join(denied.cwd, '.forge-show')), 'a refused block type writes nothing')
+  assert.match(page(view({ type: 'choice', options: [{ label: 'a' }, { label: 'b' }] })).out.deny, /cannot hold a choice block/)
+  assert.match(page(view({ type: 'confirm', summary: 's' })).out.deny, /cannot hold a confirm block/)
+  assert.match(page(view({ type: 'table', command: 'echo []' })).out.deny, /^at blocks\[1\]: a page folder cannot run a command/)
+  assert.match(page({ pane: 'Bad Name', title: 'T', blocks: [] }).out.deny, /^at /)
+  assert.equal(page(stats, { stdin: '{' }).out.deny, 'the view is not valid JSON.')
+  assert.match(page(stats, { args: [join(tmp(), 'missing.json')], stdin: '' }).out.deny, /^cannot read /)
+})
+
+test('page denies, with exit 0, when .forge-show cannot be a folder', () => {
+  const cwd = tmp()
+  writeFileSync(join(cwd, '.forge-show'), 'a file in the way')
+  const r = page(stats, { cwd })
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.out.deny, /^cannot write \.forge-show\/chk: /)
+})
+
+const PICTURE = /^p\d+(-before|-after)?-[0-9a-f]{8}(\.[A-Za-z0-9]{1,5})?$/
+
+test('page copies local pictures beside the page and never writes a file URL', () => {
+  const pics = join(tmp(), 'my pics')
+  mkdirSync(pics)
+  for (const name of ['one #1.png', 'before.jpg', 'after']) writeFileSync(join(pics, name), name)
+  const view = { pane: 'pics', title: 'T', blocks: [
+    { type: 'image', path: join(pics, 'one #1.png'), caption: 'c' },
+    { type: 'compare', before: join(pics, 'before.jpg'), after: join(pics, 'after') },
+    { type: 'image', url: 'https://example.com/x.png' },
+  ] }
+  const r = page(view)
+  assert.match(r.out.result, /^Wrote the page folder/)
+  const dir = join(r.cwd, '.forge-show', 'pics')
+  const copied = readdirSync(dir).filter((n) => PICTURE.test(n)).sort()
+  assert.equal(copied.length, 3)
+  const [one, after, before] = [copied.find((n) => /^p0-[0-9a-f]{8}\.png$/.test(n)), copied.find((n) => /^p1-after-[0-9a-f]{8}$/.test(n)), copied.find((n) => /^p1-before-[0-9a-f]{8}\.jpg$/.test(n))]
+  assert.equal(readFileSync(join(dir, one), 'utf8'), 'one #1.png')
+  assert.equal(readFileSync(join(dir, before), 'utf8'), 'before.jpg')
+  assert.equal(readFileSync(join(dir, after), 'utf8'), 'after')
+  const html = readFileSync(join(dir, 'index.html'), 'utf8')
+  assert.doesNotMatch(html, /file:\/\//)
+  assert.ok(html.includes(`"url":"${one}"`))
+  assert.ok(html.includes(`"before":"${before}"`))
+  assert.ok(html.includes(`"after":"${after}"`))
+  assert.match(html, /https:\/\/example\.com\/x\.png/)
+})
+
+test('page shows a re-rendered picture: new name, new version, the old copy removed', () => {
+  const cwd = tmp()
+  const plot = join(tmp(), 'plot.png')
+  const view = { pane: 'plot', title: 'T', blocks: [{ type: 'image', path: plot }] }
+  const dir = join(cwd, '.forge-show', 'plot')
+  writeFileSync(plot, 'first')
+  page(view, { cwd })
+  const first = readdirSync(dir).filter((n) => PICTURE.test(n))
+  const version = readFileSync(join(dir, 'index.v.js'), 'utf8')
+  writeFileSync(plot, 'second')
+  page(view, { cwd })
+  const second = readdirSync(dir).filter((n) => PICTURE.test(n))
+  assert.equal(second.length, 1)
+  assert.notEqual(second[0], first[0])
+  assert.equal(readFileSync(join(dir, second[0]), 'utf8'), 'second')
+  assert.notEqual(readFileSync(join(dir, 'index.v.js'), 'utf8'), version)
+})
+
+test('page denies a picture it cannot read', () => {
+  const r = page({ pane: 'gone', title: 'T', blocks: [{ type: 'image', path: join(tmp(), 'nope.png') }] })
+  assert.match(r.out.deny, /^at blocks\[0\]: could not copy the picture/)
+})
+
+test('page leaves an unchanged page alone, rewrites a changed one, and says a later write is an update', () => {
+  const cwd = tmp()
+  page(stats, { cwd })
+  const html = join(cwd, '.forge-show', 'chk', 'index.html')
+  const vjs = join(cwd, '.forge-show', 'chk', 'index.v.js')
+  const old = new Date(Date.now() - 60_000)
+  utimesSync(html, old, old)
+  utimesSync(vjs, old, old)
+  // Read the times back: utimes does not store a whole-millisecond Date exactly on APFS.
+  const stamped = { html: statSync(html).mtimeMs, vjs: statSync(vjs).mtimeMs }
+  const again = page(stats, { cwd })
+  assert.equal(again.out.result, 'Updated the page folder .forge-show/chk. A live card of it reloads by itself. Only if this conversation has no card for it, call show_html with path ".forge-show/chk", live true and a title.')
+  assert.equal(statSync(html).mtimeMs, stamped.html, 'an unchanged page is not rewritten')
+  assert.equal(statSync(vjs).mtimeMs, stamped.vjs)
+  const before = readFileSync(vjs, 'utf8')
+  page({ ...stats, title: 'changed' }, { cwd })
+  assert.notEqual(readFileSync(vjs, 'utf8'), before)
+  assert.notEqual(statSync(html).mtimeMs, stamped.html)
 })

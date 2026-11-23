@@ -51,4 +51,6 @@ It needs the Herdr desktop app, `terminal-browser`, and `fzf` for choice and con
 
 It is on for every Claude Code session inside the Herdr app. No `routing: on` is needed, and it does nothing outside the app.
 
+In [OpenMausBot](https://github.com/milind-soni/OpenMausBot), a bot can draw the same charts, tiles, tables, diagrams, pictures and diffs as a card in the chat. On the machine that runs OpenMausBot, run `bash scripts/install-openmausbot-skill.sh` from the main checkout (not a worktree): it links the `forge-show` skill into `~/.claude/skills`. The bot writes the drawing to `.forge-show/` in its working folder (ignored by git) and shows it with OpenMausBot's own `show_html` tool. Logs and choice or confirm questions stay Herdr only.
+
 MIT.
