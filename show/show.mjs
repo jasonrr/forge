@@ -97,7 +97,8 @@ function bring(dir, ref, name, kept) {
   const bytes = readFileSync(ref)
   const ext = /^\.[A-Za-z0-9]{1,5}$/.test(extname(ref)) ? extname(ref) : ''
   const file = `${name}-${createHash('sha1').update(bytes).digest('hex').slice(0, 8)}${ext}`
-  writeFileSync(join(dir, file), bytes)
+  // The name is the content, so a file already there is this picture: a live card mid-load never sees it rewritten.
+  if (!existsSync(join(dir, file))) put(join(dir, file), bytes)
   kept.add(file)
   return file
 }
