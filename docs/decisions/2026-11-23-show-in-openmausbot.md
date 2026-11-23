@@ -45,3 +45,4 @@ Trade-off accepted: the bot draws because a skill description says so, not becau
 
 - T1 commit c34adb9 (+ 72b6dcb) — deviation: review fix, a copied picture is written atomically and only when its content-named file is new; a half-written folder after an unreadable picture and the html/version write order were kept as the plan accepts — parked: none
 - T2 commit 214c547 (+ a6826f3) — deviation: review fixes, SKILL.md states the stats/flow/cell limits, the real deny wording and that a path starts with /; the install script warns (not refuses, so the test still runs in a worktree) when linking into a worktree, and its backup name carries the pid; the SKILL.md/hooks/show.js duplication was kept as the plan accepts — parked: none
+- review commit e1a28d2 — deviation: pageFolder and writePage share one writeStamped helper instead of the plan's copied stamp-and-skip block — parked: https://github.com/jasonrr/forge/issues/56 https://github.com/jasonrr/forge/issues/57
