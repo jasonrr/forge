@@ -83,11 +83,15 @@ export function due(view, lastRun, now) {
 function writePage(stem, view, data) {
   let themeFile
   try { themeFile = read(path('theme.json')) } catch { /* the page falls back to the default palette */ }
-  const { version, html } = buildPage(view, themeFile, { run: runShell, data })
+  writeStamped(path(stem), buildPage(view, themeFile, { run: runShell, data }))
+}
+
+// <base>.html and the <base>.v.js the page polls. An unchanged page is left alone, so nothing watching it reloads.
+function writeStamped(base, { version, html }) {
   const stamp = 'window.__v=' + JSON.stringify(version)
-  try { if (existsSync(path(stem + '.html')) && readFileSync(path(stem + '.v.js'), 'utf8') === stamp) return } catch { /* no version file yet */ }
-  put(path(stem + '.html'), html)
-  put(path(stem + '.v.js'), stamp)
+  try { if (existsSync(base + '.html') && readFileSync(base + '.v.js', 'utf8') === stamp) return } catch { /* no version file yet */ }
+  put(base + '.html', html)
+  put(base + '.v.js', stamp)
 }
 
 // A picture the card can load: copied beside index.html, because a chat card cannot read file:// URLs.
@@ -97,7 +101,7 @@ function bring(dir, ref, name, kept) {
   const bytes = readFileSync(ref)
   const ext = /^\.[A-Za-z0-9]{1,5}$/.test(extname(ref)) ? extname(ref) : ''
   const file = `${name}-${createHash('sha1').update(bytes).digest('hex').slice(0, 8)}${ext}`
-  // The name is the content, so a file already there is this picture: a live card mid-load never sees it rewritten.
+  // The name is the content, so a file already there is this picture. Not rewriting it keeps an unchanged view from touching the folder, which would reload a live card.
   if (!existsSync(join(dir, file))) put(join(dir, file), bytes)
   kept.add(file)
   return file
@@ -133,14 +137,7 @@ export function pageFolder(view, cwd = process.cwd()) {
     } catch (e) { return { deny: `at blocks[${n}]: could not copy the picture: ${first200(e)}` } }
   }
   try {
-    const { version, html } = buildPage({ ...view, blocks, cwd: view.cwd ?? resolve(cwd) }, undefined, { run: runShell, data: {}, stem: 'index' })
-    const stamp = 'window.__v=' + JSON.stringify(version)
-    let same = false
-    try { same = existed && readFileSync(join(dir, 'index.v.js'), 'utf8') === stamp } catch { /* no version file yet */ }
-    if (!same) {
-      put(join(dir, 'index.html'), html)
-      put(join(dir, 'index.v.js'), stamp)
-    }
+    writeStamped(join(dir, 'index'), buildPage({ ...view, blocks, cwd: view.cwd ?? resolve(cwd) }, undefined, { run: runShell, data: {}, stem: 'index' }))
     // Pictures an earlier version of this drawing used.
     for (const name of readdirSync(dir)) {
       if (/^p\d+(-before|-after)?-[0-9a-f]{8}(\.[A-Za-z0-9]{1,5})?$/.test(name) && !kept.has(name)) rmSync(join(dir, name), { force: true })
@@ -355,8 +352,9 @@ async function pick(file) {
 
 export async function main([cmd, ...args]) {
   if (cmd === 'open' || cmd === 'page') {
+    const file = cmd === 'page' ? args[0] : undefined
     let text
-    try { text = readFileSync(cmd === 'page' && args[0] ? args[0] : 0, 'utf8') } catch { return console.log(JSON.stringify({ deny: `cannot read ${cmd === 'page' && args[0] ? args[0] : 'the view on stdin'}.` })) }
+    try { text = readFileSync(file || 0, 'utf8') } catch { return console.log(JSON.stringify({ deny: `cannot read ${file || 'the view on stdin'}.` })) }
     let view
     try { view = JSON.parse(text) } catch { return console.log(JSON.stringify({ deny: 'the view is not valid JSON.' })) }
     console.log(JSON.stringify(cmd === 'open' ? open(view) : pageFolder(view)))
